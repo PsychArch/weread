@@ -1,0 +1,4 @@
+interface:
+  display_name: "WeRead CLI"
+  short_description: "Inspect WeRead reading data through the local CLI"
+  default_prompt: "Use $weread-cli to inspect my WeRead reading data safely."

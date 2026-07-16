@@ -1,0 +1,58 @@
+{
+  "name": "@psycharch/weread",
+  "version": "0.1.0",
+  "description": "Unofficial human- and agent-friendly CLI for the WeRead Agent Gateway.",
+  "type": "module",
+  "license": "MIT",
+  "author": "PsychArch",
+  "bin": {
+    "weread": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup src/cli.ts --format esm --target node20 --clean --sourcemap",
+    "check": "tsc --noEmit",
+    "test": "pnpm run build && vitest run",
+    "test:live": "pnpm run build && node scripts/live-smoke.mjs",
+    "pack:check": "node scripts/verify-package.mjs",
+    "verify": "pnpm run check && pnpm test && pnpm run pack:check",
+    "prepack": "pnpm run build",
+    "prepublishOnly": "pnpm run verify"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "commander": "^14.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  },
+  "keywords": [
+    "weread",
+    "wechat-reading",
+    "cli",
+    "books",
+    "notes",
+    "highlights"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PsychArch/weread-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/PsychArch/weread-cli/issues"
+  },
+  "homepage": "https://github.com/PsychArch/weread-cli#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "packageManager": "pnpm@11.3.0"
+}
