@@ -17,7 +17,7 @@ This project is not affiliated with or endorsed by Tencent or WeRead.
 pnpm add --global @psycharch/weread
 ```
 
-The installed executable is `weread`. Node.js 20 or newer is required.
+The installed executable is `weread`. Node.js 22.12 or newer is required.
 
 ## Authenticate
 

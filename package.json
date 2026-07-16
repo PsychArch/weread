@@ -14,7 +14,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup src/cli.ts --format esm --target node20 --clean --sourcemap",
+    "build": "tsup src/cli.ts --format esm --target node22 --clean --sourcemap",
     "check": "tsc --noEmit",
     "test": "pnpm run build && vitest run",
     "test:live": "pnpm run build && node scripts/live-smoke.mjs",
@@ -24,13 +24,13 @@
     "prepublishOnly": "pnpm run verify"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12.0"
   },
   "dependencies": {
-    "commander": "^14.0.3"
+    "commander": "^15.0.0"
   },
   "devDependencies": {
-    "@types/node": "^20.19.43",
+    "@types/node": "^22.20.1",
     "tsup": "^8.5.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
