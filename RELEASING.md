@@ -3,37 +3,21 @@
 This runbook is for maintainers publishing `@psycharch/weread` from
 `PsychArch/weread`.
 
-## Before the first release
+## Bootstrap status
 
-1. Reconfirm that `pnpm view @psycharch/weread` returns HTTP 404.
-2. Create the public GitHub repository and push `main`.
-3. Run the complete local gate:
+`@psycharch/weread@0.1.0` is public on npm with the `latest` tag, and the public
+source repository is `PsychArch/weread`. The bootstrap release was published
+locally, so it does not have a provenance attestation.
 
-   ```bash
-   pnpm install --frozen-lockfile
-   pnpm run verify
-   WEREAD_API_KEY="wrk-..." pnpm run test:live
-   pnpm dlx npm@11.18.0 publish --dry-run --access public
-   ```
+In the npm package settings, add a GitHub Actions trusted publisher for:
 
-4. Publish `0.1.0` once from an npm account with two-factor authentication:
+- organization: `PsychArch`
+- repository: `weread`
+- workflow: `publish.yml`
+- environment: leave blank
 
-   ```bash
-   pnpm publish --access public
-   ```
-
-   Supply the one-time password interactively when prompted. Never commit an
-   npm token or place one in a command that will remain in shell history.
-
-5. In the npm package settings, add a GitHub Actions trusted publisher for:
-
-   - organization: `PsychArch`
-   - repository: `weread`
-   - workflow: `publish.yml`
-   - environment: leave blank
-
-The bootstrap publish is necessary because trusted-publisher settings belong
-to an existing npm package.
+This enables future releases to publish with short-lived OIDC credentials and
+provenance instead of a long-lived npm token.
 
 ## Subsequent releases
 
