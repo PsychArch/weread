@@ -173,9 +173,9 @@ pnpm run verify
 `verify` type-checks, builds, runs unit and built-CLI tests, creates the npm
 artifact, checks its exact file list, and scans it for local paths and API-key
 shaped values. See the
-[release runbook](https://github.com/PsychArch/weread-cli/blob/main/RELEASING.md)
+[release runbook](https://github.com/PsychArch/weread/blob/main/RELEASING.md)
 for the GitHub/npm flow and the
-[security policy](https://github.com/PsychArch/weread-cli/blob/main/SECURITY.md)
+[security policy](https://github.com/PsychArch/weread/blob/main/SECURITY.md)
 for private vulnerability reporting.
 
 Maintainers can run the bounded, read-only gateway suite with an exported key:

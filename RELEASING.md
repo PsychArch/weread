@@ -1,7 +1,7 @@
 # Releasing
 
 This runbook is for maintainers publishing `@psycharch/weread` from
-`PsychArch/weread-cli`.
+`PsychArch/weread`.
 
 ## Before the first release
 
@@ -28,7 +28,7 @@ This runbook is for maintainers publishing `@psycharch/weread` from
 5. In the npm package settings, add a GitHub Actions trusted publisher for:
 
    - organization: `PsychArch`
-   - repository: `weread-cli`
+   - repository: `weread`
    - workflow: `publish.yml`
    - environment: leave blank
 
