@@ -106,10 +106,10 @@ export function projectProgress(result: unknown, fallbackBookId: string) {
   const record = asRecord(result);
   const nestedBook = asRecord(record.book);
   const book = Object.keys(nestedBook).length ? nestedBook : record;
-  const readingSeconds = number(book.readingTime) ?? number(book.recordReadingTime) ?? 0;
+  const readingSeconds = number(book.readingTime) ?? number(book.recordReadingTime) ?? null;
   return {
     bookId: text(record.bookId) || fallbackBookId,
-    percent: number(book.progress) ?? 0,
+    percent: number(book.progress) ?? null,
     chapterUid: String(book.chapterUid ?? ""),
     readingSeconds,
     updatedAt: timestampIso(book.updateTime),
@@ -189,6 +189,152 @@ export function projectNotebooks(result: unknown, limit = Number.POSITIVE_INFINI
     hasMore: record.hasMore === 1 || record.hasMore === true,
     books,
   };
+}
+
+type ThoughtSampleReason =
+  | "all-thought-books"
+  | "high-thought-count"
+  | "recent-notebook-update"
+  | "new-category"
+  | "fill";
+
+export function sampleThoughtNotebooks(index: ReturnType<typeof projectNotebooks>) {
+  const maximumBooks = 50;
+  const highThoughtLimit = 25;
+  const recentUpdateLimit = 15;
+  const newCategoryLimit = 10;
+  const thoughtBooks = index.books.filter((item) => item.thoughtCount > 0);
+  const selected: Array<{
+    item: (typeof thoughtBooks)[number];
+    selectedBy: ThoughtSampleReason;
+    addedCategories: string[];
+  }> = [];
+  const selectedIds = new Set<string>();
+  const selectedCategories = new Set<string>();
+
+  const add = (item: (typeof thoughtBooks)[number], selectedBy: ThoughtSampleReason) => {
+    if (selectedIds.has(item.book.bookId) || selected.length >= maximumBooks) return false;
+    const categories = notebookCategories(item);
+    const addedCategories = categories.filter((category) => !selectedCategories.has(category));
+    selected.push({ item, selectedBy, addedCategories });
+    selectedIds.add(item.book.bookId);
+    categories.forEach((category) => selectedCategories.add(category));
+    return true;
+  };
+
+  const byThoughtCount = [...thoughtBooks].sort(compareThoughtBooks);
+  if (thoughtBooks.length <= maximumBooks) {
+    byThoughtCount.forEach((item) => add(item, "all-thought-books"));
+  } else {
+    byThoughtCount.slice(0, highThoughtLimit).forEach((item) => add(item, "high-thought-count"));
+    [...thoughtBooks]
+      .filter((item) => !selectedIds.has(item.book.bookId))
+      .sort(compareRecentThoughtBooks)
+      .slice(0, recentUpdateLimit)
+      .forEach((item) => add(item, "recent-notebook-update"));
+
+    for (let count = 0; count < newCategoryLimit; count += 1) {
+      const candidate = thoughtBooks
+        .filter((item) => !selectedIds.has(item.book.bookId))
+        .map((item) => ({
+          item,
+          newCategories: notebookCategories(item).filter((category) => !selectedCategories.has(category)),
+        }))
+        .filter((entry) => entry.newCategories.length > 0)
+        .sort((left, right) => (
+          right.newCategories.length - left.newCategories.length
+          || compareThoughtBooks(left.item, right.item)
+        ))[0];
+      if (!candidate) break;
+      add(candidate.item, "new-category");
+    }
+
+    byThoughtCount
+      .filter((item) => !selectedIds.has(item.book.bookId))
+      .forEach((item) => add(item, "fill"));
+  }
+
+  const selectedThoughtCount = selected.reduce((sum, entry) => sum + entry.item.thoughtCount, 0);
+  const totalThoughtCount = thoughtBooks.reduce((sum, item) => sum + item.thoughtCount, 0);
+  const allCategories = new Set(thoughtBooks.flatMap(notebookCategories));
+  const bookIds = selected.map((entry) => entry.item.book.bookId);
+  const notebookUpdateYears = [...new Set(selected
+    .map((entry) => entry.item.updatedAt?.slice(0, 4))
+    .filter((year): year is string => Boolean(year)))]
+    .sort();
+
+  return {
+    index: {
+      totalBookCount: index.totalBookCount,
+      totalSavedItemCount: index.totalNoteCount,
+      booksWithThoughts: thoughtBooks.length,
+      totalThoughtCount,
+      totalCategories: allCategories.size,
+    },
+    selectionRule: {
+      maximumBooks,
+      highThoughtLimit,
+      recentUpdateLimit,
+      newCategoryLimit,
+      recencyField: "notebook.updatedAt",
+      ordering: {
+        highThought: ["thoughtCount:desc", "updatedAt:desc", "bookId:asc"],
+        recentUpdate: ["updatedAt:desc", "thoughtCount:desc", "bookId:asc"],
+        newCategory: ["newCategoryCount:desc", "thoughtCount:desc", "updatedAt:desc", "bookId:asc"],
+      },
+      categoryRule: "Select the remaining book that adds the most unseen categories, then apply the tie-breakers.",
+      fillRule: "Fill any remaining slots by thoughtCount after the category pass.",
+    },
+    bookIds,
+    selected: selected.map(({ item, selectedBy, addedCategories }) => ({
+      book: {
+        bookId: item.book.bookId,
+        title: item.book.title,
+        author: item.book.author,
+        ...(item.book.category ? { category: item.book.category } : {}),
+        ...(item.book.categories?.length ? { categories: item.book.categories } : {}),
+      },
+      thoughtCount: item.thoughtCount,
+      updatedAt: item.updatedAt,
+      selectedBy,
+      addedCategories,
+    })),
+    coverage: {
+      selectedBooks: selected.length,
+      selectedThoughtCount,
+      thoughtCoverageRatio: totalThoughtCount ? selectedThoughtCount / totalThoughtCount : 1,
+      selectedCategories: selectedCategories.size,
+      totalCategories: allCategories.size,
+      notebookUpdateYears,
+      requestedIds: bookIds.length,
+      uniqueIds: new Set(bookIds).size,
+    },
+  };
+}
+
+function notebookCategories(item: ReturnType<typeof projectNotebooks>["books"][number]): string[] {
+  return [...new Set([
+    ...(item.book.categories ?? []),
+    ...(item.book.category ? [item.book.category] : []),
+  ].filter(Boolean))];
+}
+
+function compareThoughtBooks(
+  left: ReturnType<typeof projectNotebooks>["books"][number],
+  right: ReturnType<typeof projectNotebooks>["books"][number],
+): number {
+  return right.thoughtCount - left.thoughtCount
+    || (right.updatedAt ?? "").localeCompare(left.updatedAt ?? "")
+    || left.book.bookId.localeCompare(right.book.bookId);
+}
+
+function compareRecentThoughtBooks(
+  left: ReturnType<typeof projectNotebooks>["books"][number],
+  right: ReturnType<typeof projectNotebooks>["books"][number],
+): number {
+  return (right.updatedAt ?? "").localeCompare(left.updatedAt ?? "")
+    || right.thoughtCount - left.thoughtCount
+    || left.book.bookId.localeCompare(right.book.bookId);
 }
 
 export async function fetchNotebooks(
@@ -460,12 +606,24 @@ export function inspectBook(input: {
   const pricedCount = chapterData.chapters.filter((chapter) => chapter.price > 0).length;
   const purchasedCount = chapterData.chapters.filter((chapter) => chapter.paid).length;
   const unknownPriceCount = chapterData.chapters.filter((chapter) => chapter.price < 0).length;
-  const readable = !soldOut && freeCount + purchasedCount > 0;
+  const confirmedReadableChapterCount = chapterData.chapters
+    .filter((chapter) => chapter.price === 0 || chapter.paid)
+    .length;
+  const accessLevel = soldOut
+    ? "unavailable"
+    : chapterData.count > 0 && confirmedReadableChapterCount === chapterData.count
+      ? "all-chapters"
+      : confirmedReadableChapterCount > 0
+        ? "some-chapters"
+        : "unconfirmed";
+  const readable = accessLevel === "some-chapters" || accessLevel === "all-chapters";
   return {
     book: info,
     availability: {
       available: !soldOut,
       readable,
+      accessLevel,
+      confirmedReadableChapterCount,
       ...(soldOut ? { reason: "sold-out" } : !readable ? { reason: "no-confirmed-readable-chapters" } : {}),
     },
     chapters: {

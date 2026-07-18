@@ -38,6 +38,29 @@ export interface StatsTrendPeriod extends Omit<StatsSummary, "readTimes" | "read
   counts: StatsCountSummary[];
 }
 
+export interface StatsHistoryMetric {
+  ratio: number;
+  percent: number;
+}
+
+export interface StatsHistoryChange extends StatsHistoryMetric {
+  previousYear: number;
+  direction: "up" | "down" | "unchanged";
+  basis: "total-read-time";
+}
+
+export interface StatsHistoryAnalysis {
+  calendarDays: number;
+  readingDayCoverage: (StatsHistoryMetric & { basis: "calendar-year" }) | null;
+  accumulatedReadTimePerReadingDay: { seconds: number; basis: "reading-day-total-not-session" } | null;
+  totalReadTimeChange: StatsHistoryChange | null;
+}
+
+export interface StatsHistoryPeriod extends StatsTrendPeriod {
+  year: number;
+  historyAnalysis: StatsHistoryAnalysis;
+}
+
 export interface StatsComparison {
   ratio: number;
   percent: number;
@@ -50,6 +73,13 @@ export interface StatsDataQuality {
   durationBreakdownMatchesTotal?: boolean;
 }
 
+export interface StatsHistoryRange {
+  firstNonzeroYear: number | null;
+  lastCompleteYear: number;
+  currentYear: number;
+  source: "stats.trend.overall.buckets";
+}
+
 export const STATS_FIELD_GUIDE = {
   durationUnit: "seconds",
   totalReadTime: "Authoritative reading/listening total for the requested period.",
@@ -57,6 +87,7 @@ export const STATS_FIELD_GUIDE = {
   compare: "Ratio change in natural-day average versus the previous equivalent period; 0.2 means up 20%.",
   counts: "Period event summaries from WeRead; read and finished counts are not a cohort completion rate.",
   buckets: "Bucket size depends on mode: day for weekly/monthly, month for annually, year for overall.",
+  categories: "Category count and readTime are separate metrics. Name the metric used for any ranking; do not claim a category leads both unless both values were compared.",
   durationBreakdown: "Use totalReadTime when wrReadTime plus wrListenTime does not match it.",
   topBooks: "WeRead returns at most 10 ranked items; unidentified upstream items are omitted and reported in dataQuality/warnings.",
 } as const;
@@ -157,6 +188,61 @@ export function statsWarnings(periods: StatsTrendPeriod[]): string[] {
   return warnings;
 }
 
+export function statsHistoryRange(periods: StatsTrendPeriod[], currentYear: number): StatsHistoryRange {
+  const overall = periods.find((period) => period.mode === "overall");
+  const years = (overall?.buckets ?? [])
+    .filter((bucket) => bucket.seconds > 0)
+    .map((bucket) => Number(bucket.startDate.slice(0, 4)))
+    .filter((year) => Number.isInteger(year));
+  return {
+    firstNonzeroYear: years.length ? Math.min(...years) : null,
+    lastCompleteYear: currentYear - 1,
+    currentYear,
+    source: "stats.trend.overall.buckets",
+  };
+}
+
+export function annotateHistoryPeriods(
+  periods: Array<StatsTrendPeriod & { year: number }>,
+): StatsHistoryPeriod[] {
+  return periods.map((period, index) => {
+    const calendarDays = isLeapYear(period.year) ? 366 : 365;
+    const readingDayCoverage = period.readDays !== undefined
+      ? metric(period.readDays / calendarDays, "calendar-year")
+      : null;
+    const accumulatedReadTimePerReadingDay = period.totalReadTime !== undefined
+      && period.readDays !== undefined
+      && period.readDays > 0
+      ? {
+          seconds: period.totalReadTime / period.readDays,
+          basis: "reading-day-total-not-session" as const,
+        }
+      : null;
+    const previous = periods[index - 1];
+    const changeRatio = previous?.year === period.year - 1
+      && previous.totalReadTime !== undefined
+      && previous.totalReadTime > 0
+      && period.totalReadTime !== undefined
+      ? period.totalReadTime / previous.totalReadTime - 1
+      : undefined;
+    return {
+      ...period,
+      historyAnalysis: {
+        calendarDays,
+        readingDayCoverage,
+        accumulatedReadTimePerReadingDay,
+        totalReadTimeChange: changeRatio === undefined || previous === undefined
+          ? null
+          : {
+              previousYear: previous.year,
+              ...metric(changeRatio, "total-read-time"),
+              direction: changeRatio > 0 ? "up" : changeRatio < 0 ? "down" : "unchanged",
+            },
+      },
+    };
+  });
+}
+
 export function parsePeriodDate(value: string): number {
   const normalized = /^\d{4}$/.test(value)
     ? `${value}-01-01`
@@ -229,6 +315,17 @@ function bucketGranularity(mode: string): StatsBucketGranularity {
   if (mode === "annually") return "month";
   if (mode === "overall") return "year";
   return "day";
+}
+
+function metric<T extends "calendar-year" | "total-read-time">(
+  ratio: number,
+  basis: T,
+): StatsHistoryMetric & { basis: T } {
+  return { ratio, percent: ratio * 100, basis };
+}
+
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
 }
 
 function finiteNumber(value: unknown): number | undefined {

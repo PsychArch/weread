@@ -14,6 +14,8 @@ export interface AgentMetadata {
   complete?: boolean;
   timeZone?: string;
   warnings?: string[];
+  operationId?: string;
+  schemaId?: string;
 }
 
 let metadataProvider: (() => AgentMetadata) | undefined;
@@ -40,6 +42,8 @@ export function agentSuccess(data: unknown, metadata: AgentMetadata = {}) {
       gatewaySkillVersion: metadata.gatewaySkillVersion ?? SKILL_VERSION,
       complete: metadata.complete ?? true,
       timeZone: metadata.timeZone ?? "Asia/Shanghai",
+      ...(metadata.operationId ? { operationId: metadata.operationId } : {}),
+      ...(metadata.schemaId ? { schemaId: metadata.schemaId } : {}),
     },
     warnings: metadata.warnings ?? [],
   };
@@ -75,6 +79,8 @@ export function printError(options: GlobalOptions, error: unknown, metadata: Age
         gatewaySkillVersion: metadata.gatewaySkillVersion ?? SKILL_VERSION,
         complete: false,
         timeZone: metadata.timeZone ?? "Asia/Shanghai",
+        ...(metadata.operationId ? { operationId: metadata.operationId } : {}),
+        ...(metadata.schemaId ? { schemaId: metadata.schemaId } : {}),
       },
       warnings: metadata.warnings ?? [],
     }));

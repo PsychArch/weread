@@ -1,14 +1,23 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-
-if (!process.env.WEREAD_API_KEY) {
-  throw new Error("Set WEREAD_API_KEY before running the live smoke suite.");
-}
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
 
 const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+const ajv = new Ajv2020({ allErrors: true, strict: true });
+addFormats(ajv);
+const validators = new Map();
 
 const capabilities = json(["capabilities"]);
 assert(capabilities.safety?.gatewayOperations === "read-only", "Capabilities do not report a read-only gateway.");
+validateSchemaDocument(capabilities, json(["schema", "get", "capabilities"]), "capabilities");
+const historyContract = json(["capabilities", "--operation", "stats.history"]);
+validateSchemaDocument(historyContract, json(["schema", "get", "capabilities"]), "scoped capabilities");
+assert(historyContract.operations?.length === 1, "Scoped capabilities returned more than one operation.");
+assert(
+  historyContract.operations[0]?.input?.options?.every((option) => option.required === true),
+  "Stats history input contract does not expose its required options.",
+);
 
 const doctor = agent(["doctor"]);
 assert(doctor.data.ready === true, "Doctor did not report data.ready=true.");
@@ -23,6 +32,10 @@ assert(/^https:\/\//.test(exact?.bookInfo?.deepLink ?? ""), "Search did not retu
 
 const resolved = agent(["book", "resolve", "基因传"]);
 assert(resolved.data.bookId === bookId, "Book resolution drifted from search.");
+assert(resolved.data.match === "exact-title", "Exact book resolution did not report exact-title match quality.");
+const resolvedBatch = agent(["book", "resolve-batch", "--name", "基因传", "--name", "人类简史"]);
+assert(resolvedBatch.data.requested === 2, "Batch resolution did not accept both candidate names.");
+assert(resolvedBatch.data.books.every((entry) => ["exact-title", "first-search-result"].includes(entry.match)), "Batch resolution omitted match quality.");
 
 const info = json(["book", "info", bookId]);
 assert(info.bookId === bookId && typeof info.title === "string", "Book info shape is invalid.");
@@ -40,6 +53,10 @@ assert(
   "Compact book rating is not normalized to 0-10.",
 );
 assert(typeof inspection.data.progress?.readingSeconds === "number", "Compact progress has no readingSeconds.");
+assert(
+  ["unavailable", "unconfirmed", "some-chapters", "all-chapters"].includes(inspection.data.availability?.accessLevel),
+  "Book inspection has no explicit chapter access level.",
+);
 
 if (second?.bookInfo?.bookId) {
   const batch = agent([
@@ -59,13 +76,24 @@ const stats = agent(["stats", "detail", "--mode", "monthly"]);
 assert(stats.data.fieldGuide?.durationUnit === "seconds", "Stats detail is missing its field guide.");
 const trend = agent(["stats", "trend"]);
 assert(trend.data.periods?.length === 4, "Stats trend did not return all four periods.");
+assert(Number.isInteger(trend.data.historyRange?.firstNonzeroYear), "Stats trend did not derive a first nonzero history year.");
+assert(trend.data.historyRange?.lastCompleteYear === trend.data.historyRange?.currentYear - 1, "Stats trend history bounds are inconsistent.");
+const history = agent(["stats", "history", "--from", "2024", "--to", "2025"]);
+assert(history.data.periods?.length === 2, "Stats history did not return both requested years.");
+assert(history.data.periods[1]?.historyAnalysis?.totalReadTimeChange?.previousYear === 2024, "Stats history did not derive its annual comparison.");
 
 const notebooks = agent(["notes", "notebooks", "--limit", "2"]);
 assert(Array.isArray(notebooks.data.books), "Notebook projection is invalid.");
+const sample = agent(["notes", "sample"]);
+assert(sample.data.bookIds.length === sample.data.coverage.uniqueIds, "Thought sample contains duplicate book IDs.");
+assert(sample.data.coverage.selectedBooks <= 50, "Thought sample exceeded 50 books.");
 const exported = agent(["notes", "export", bookId, "--format", "json"]);
 assert(exported.data.bookId === bookId, "Notes export returned the wrong book.");
-const corpus = agent(["notes", "corpus", "--book-id", bookId]);
+const corpus = agent(["notes", "corpus", "--book-id", bookId, "--view", "thoughts"]);
 assert(corpus.data.totals?.books === 1, "Notes corpus did not return one requested book.");
+assert(corpus.data.books.every((entry) => entry.highlights === undefined), "Thoughts view still returned standalone highlights.");
+assert(corpus.data.totals?.returnedHighlights === 0, "Thoughts view reports omitted highlights as returned.");
+assert(corpus.data.totals?.returnedItems === corpus.data.totals?.returnedThoughts, "Thoughts view returned-item totals are inconsistent.");
 const popular = agent(["notes", "popular", bookId, "--limit", "2"]);
 assert(popular.data.returned <= 2, "Popular highlights exceeded the requested limit.");
 
@@ -88,7 +116,7 @@ assert(Array.isArray(apiList.apis) && apiList.apis.length > 0, "Raw gateway esca
 
 console.log(JSON.stringify({
   ok: true,
-  checks: 20,
+  checks: 27,
   gatewaySkillVersion: doctor.meta.gatewaySkillVersion,
   discoveredApis: apiList.apis.length,
 }));
@@ -102,7 +130,24 @@ function agent(args) {
   assert(result.ok === true, `Agent command failed: ${args.join(" ")}`);
   assert(result.meta?.complete !== undefined, `Agent command has no completeness metadata: ${args.join(" ")}`);
   assert(Array.isArray(result.warnings), `Agent command has no warnings array: ${args.join(" ")}`);
+  if (result.meta?.schemaId) {
+    const operationId = result.meta.operationId;
+    assert(typeof operationId === "string", `Schema-backed response has no operationId: ${args.join(" ")}`);
+    let validate = validators.get(operationId);
+    if (!validate) {
+      validate = ajv.compile(json(["schema", "get", operationId]));
+      validators.set(operationId, validate);
+    }
+    assert(validate(result), `Schema validation failed for ${operationId}: ${JSON.stringify(validate.errors)}`);
+  }
   return result;
+}
+
+function validateSchemaDocument(value, schema, label) {
+  const validate = typeof schema.$id === "string"
+    ? (ajv.getSchema(schema.$id) ?? ajv.compile(schema))
+    : ajv.compile(schema);
+  assert(validate(value), `Schema validation failed for ${label}: ${JSON.stringify(validate.errors)}`);
 }
 
 function run(args) {

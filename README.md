@@ -100,7 +100,9 @@ Place `--agent` before a command to receive compact normalized JSON:
 ```bash
 weread --agent stats trend
 weread --agent book inspect 922224
+weread --agent book resolve-batch --name "为什么" --name "这才是心理学"
 weread --agent shelf list --all
+weread --agent notes sample
 weread --agent notes corpus --book-id 922224 --book-id 3300045871
 weread --agent reviews batch --book-id 922224 --type recommend,latest --limit 3
 ```
@@ -117,7 +119,9 @@ workflows. Every successful response uses the same envelope:
     "schemaVersion": "2",
     "gatewaySkillVersion": "1.0.5",
     "complete": true,
-    "timeZone": "Asia/Shanghai"
+    "timeZone": "Asia/Shanghai",
+    "operationId": "stats.trend",
+    "schemaId": "urn:weread:agent:2:stats.trend"
   },
   "warnings": []
 }
@@ -127,17 +131,32 @@ Before drawing conclusions, an agent should inspect `ok`, `meta.complete`, and
 `warnings`. A request may succeed while still carrying a pagination limit or a
 data-quality caveat.
 
-The complete command surface and field guidance are discoverable without
-reading this README:
+The CLI exposes a strict operation manifest and bundled Draft 2020-12 response
+schemas. An agent can inspect one operation before it writes a `jq` path,
+without making a live data request:
 
 ```bash
-weread capabilities --json
+weread capabilities --operation stats.trend --json
+weread schema get stats.trend --data
 ```
+
+Manifest version 2 declares the `executable`, the agent `command.argv` passed
+to it, a typed input contract with required and repeatable flags, and both
+`output.dataSchemaCommand` and `output.schemaCommand`. This removes the need to
+guess a manifest field or fall back to human help. Use the full
+`weread capabilities --json` catalog only when the operation ID is unknown.
+
+The manifest is described by `weread schema get capabilities`. Schema output is
+compact by default; add `--pretty` for human inspection. `schemaVersion` is a
+compatibility label, while `meta.schemaId` identifies the actual response
+contract. Omit `--data` only when a validator needs the complete success/error
+envelope.
 
 ### Reading trends
 
 ```bash
 weread --agent stats trend
+weread --agent stats history --from 2020 --to 2025
 weread --agent stats detail --mode annually --date 2025
 ```
 
@@ -145,19 +164,25 @@ weread --agent stats detail --mode annually --date 2025
 include a `fieldGuide` that explains units and comparison semantics, leaving
 less room for an agent to infer meaning from field names alone.
 
+Each `stats history` annual period also includes schema-backed
+`historyAnalysis`: calendar-year reading-day coverage, accumulated time per
+reading day, and total-time change from the preceding returned year. The
+accumulated-time basis is explicitly a reading-day total, not a session length.
+
 ### Notes and personal thoughts
 
-Start with the full notebook index, then choose a relevant set of books for the
-corpus:
+Start with the deterministic thought sample, then use its unique book IDs for
+the corpus:
 
 ```bash
-weread --agent notes notebooks --all
-weread --agent notes corpus --book-id 922224 --book-id 3300045871
+weread --agent notes sample
+weread --agent notes corpus --view thoughts --book-id 922224 --book-id 3300045871
 ```
 
-The compact corpus distinguishes quoted book text from the reader's own words.
-This matters when an agent is looking for recurring ideas or describing the
-reader's point of view.
+`notes sample` fetches the complete notebook index and applies one stable
+50-book selection rule in the CLI, so separate agents do not implement subtly
+different sampling algorithms. The compact corpus distinguishes quoted book
+text from the reader's own words.
 
 ### Recommendations with verification
 
@@ -165,6 +190,7 @@ Personalized discovery is useful as a source of candidates:
 
 ```bash
 weread --agent discover recommend --limit 12
+weread --agent book resolve-batch --name "Candidate one" --name "Candidate two"
 ```
 
 Before presenting a shortlist, inspect the books together:
@@ -173,9 +199,11 @@ Before presenting a shortlist, inspect the books together:
 weread --agent book inspect-batch --book-id 922224 --book-id 3300045871
 ```
 
-Inspection checks availability, shelf presence, progress, and note presence.
-The final recommendation remains an agent decision, where the reader's goals
-and existing knowledge can be considered.
+Inspection checks chapter access, shelf presence, progress, and note presence.
+`accessLevel=all-chapters` confirms every returned chapter as readable;
+`some-chapters` confirms only partial access, and `unconfirmed` must not be
+described as a readable full book. The final recommendation remains an agent
+decision, where the reader's goals and existing knowledge can be considered.
 
 ## Output and data boundaries
 
@@ -190,12 +218,17 @@ are converted to ISO strings, and durations remain seconds. Statistics include
 their own field guidance. In particular, `dayAverageReadTime` is based on
 natural calendar days rather than active reading days, and `compare` is the
 ratio change in that average. A value of `0.2` means an increase of 20%.
+Unreported book progress is `null`, rather than an invented zero.
 
 `notes notebooks --all` follows every cursor page. A bounded result sets
 `meta.complete=false` when more pages remain. One notes corpus accepts up to 50
 book IDs. Bookmark positions contribute to WeRead's notebook counts but are not
 exportable as note content. In compact output, `thoughts[].content` contains the
-reader's wording; `quotedText` and `contextText` come from the book.
+reader's wording; `quotedText` and `contextText` come from the book. The
+`--view thoughts` corpus view omits standalone highlights when the task only
+needs the reader's own comments. Corpus `source*` totals describe the fetched
+source material, while `returned*` totals describe the arrays actually emitted
+for the selected view.
 
 Public-review output for agents is bounded and reports truncation. Returned
 links are included only when the gateway supplies a `deepLink`; the CLI does not
@@ -255,10 +288,11 @@ scans it for unexpected files, local paths, or API-key-shaped values. Release
 instructions are in [RELEASING.md](RELEASING.md), and security reports are
 covered by [SECURITY.md](SECURITY.md).
 
-Maintainers can run the bounded, read-only gateway suite with an exported key:
+Maintainers can run the bounded, read-only gateway suite with an exported key
+or the local CLI config:
 
 ```bash
-WEREAD_API_KEY="wrk-..." pnpm run test:live
+pnpm run test:live
 ```
 
 ## License

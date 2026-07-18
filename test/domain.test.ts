@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   fetchMineReviews,
   fetchNotebooks,
+  inspectBook,
   limitShelfRaw,
   projectChapters,
   projectNotebooks,
@@ -11,6 +12,7 @@ import {
   projectSearch,
   projectShelfEntries,
   projectSimilar,
+  sampleThoughtNotebooks,
   type GatewayCaller,
 } from "../src/domain.js";
 
@@ -47,6 +49,38 @@ describe("bounded domain projections", () => {
       bookId: "1",
       book: { progress: 42, readingTime: 86743, recordReadingTime: 0 },
     }, "1")).toMatchObject({ percent: 42, readingSeconds: 86743 });
+    expect(projectProgress({ bookId: "2" }, "2")).toMatchObject({
+      percent: null,
+      readingSeconds: null,
+    });
+  });
+
+  it("distinguishes partial chapter access from confirmed full-book access", () => {
+    const base = {
+      bookId: "1",
+      info: { bookId: "1", title: "Book", soldout: 0 },
+      progress: { bookId: "1" },
+      shelf: { books: [] },
+      notebooks: { books: [] },
+    };
+
+    expect(inspectBook({
+      ...base,
+      chapters: { chapters: [{ price: 0 }, { price: 10 }, {}] },
+    }).availability).toMatchObject({
+      available: true,
+      readable: true,
+      accessLevel: "some-chapters",
+      confirmedReadableChapterCount: 1,
+    });
+
+    expect(inspectBook({
+      ...base,
+      chapters: { chapters: [{ price: 0 }, { price: 10, paid: 1 }] },
+    }).availability).toMatchObject({
+      accessLevel: "all-chapters",
+      confirmedReadableChapterCount: 2,
+    });
   });
 
   it("applies shelf limits to raw-compatible JSON and compact agent output", () => {
@@ -176,6 +210,35 @@ describe("bounded domain projections", () => {
       book: { category: "文学-散文杂著", categories: ["文学-散文杂著"] },
       updatedAt: "2026-05-31T16:00:00.000Z",
     });
+  });
+
+  it("builds a deterministic, deduplicated thought sample without agent-side jq", () => {
+    const index = projectNotebooks({
+      totalBookCount: 60,
+      totalNoteCount: 1_830,
+      hasMore: 0,
+      books: Array.from({ length: 60 }, (_, itemIndex) => ({
+        sort: 1_700_000_000 + itemIndex,
+        reviewCount: 60 - itemIndex,
+        book: {
+          bookId: String(itemIndex).padStart(2, "0"),
+          title: `Book ${itemIndex}`,
+          author: "Author",
+          categories: [{ title: `Category ${itemIndex}` }],
+        },
+      })),
+    });
+
+    const first = sampleThoughtNotebooks(index);
+    const second = sampleThoughtNotebooks(index);
+
+    expect(second).toEqual(first);
+    expect(first.bookIds).toHaveLength(50);
+    expect(new Set(first.bookIds).size).toBe(50);
+    expect(first.selected.filter((entry) => entry.selectedBy === "high-thought-count")).toHaveLength(25);
+    expect(first.selected.filter((entry) => entry.selectedBy === "recent-notebook-update")).toHaveLength(15);
+    expect(first.selected.filter((entry) => entry.selectedBy === "new-category")).toHaveLength(10);
+    expect(first.coverage).toMatchObject({ selectedBooks: 50, requestedIds: 50, uniqueIds: 50 });
   });
 
   it("separates personal words from quoted context and classifies non-text entries", () => {

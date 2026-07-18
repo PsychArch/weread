@@ -23,15 +23,29 @@ import {
   projectSearch,
   projectShelfEntries,
   projectSimilar,
+  sampleThoughtNotebooks,
   text,
 } from "./domain.js";
 import { CliError } from "./errors.js";
 import { formatDate, formatDuration, formatRating, formatStars, truncate } from "./format.js";
-import { AGENT_SCHEMA_VERSION, GlobalOptions, printError, printResult, setAgentMetadataProvider } from "./output.js";
+import { GlobalOptions, printError, printResult, setAgentMetadataProvider } from "./output.js";
+import {
+  CAPABILITIES_MANIFEST_VERSION,
+  CAPABILITIES_SCHEMA_ID,
+  JSON_SCHEMA_DIALECT,
+  STABLE_OPERATIONS,
+  dataSchemaFor,
+  operationManifest,
+  schemaFor,
+  schemaIdForOperation,
+  stableOperationFor,
+} from "./schemas.js";
 import {
   STATS_FIELD_GUIDE,
   StatsTrendPeriod,
+  annotateHistoryPeriods,
   parsePeriodDate,
+  statsHistoryRange,
   statsWarnings,
   summarizeStats,
   summarizeTrendPeriod,
@@ -65,15 +79,24 @@ program
   .name("weread")
   .description("Human- and agent-friendly CLI for the WeRead Agent Gateway.")
   .version(VERSION)
-  .option("--json", "emit JSON (raw-compatible for existing commands)")
+  .option("--json", "emit raw-compatible JSON; use --agent for a stable schema-backed contract")
   .option("--agent", "emit a compact, versioned JSON envelope for agents")
   .option("--skill-version <version>", "override the gateway protocol version");
 
 let applicationClient: WereadClient | undefined;
-setAgentMetadataProvider(() => ({
-  gatewaySkillVersion: applicationClient?.skillVersion ?? globalOptions().skillVersion ?? SKILL_VERSION,
-  warnings: applicationClient?.getWarnings() ?? [],
-}));
+let activeOperationId: string | undefined;
+program.hook("preAction", (_rootCommand, actionCommand) => {
+  activeOperationId = operationIdFor(actionCommand);
+});
+setAgentMetadataProvider(() => {
+  const schemaId = schemaIdForOperation(activeOperationId);
+  return {
+    gatewaySkillVersion: applicationClient?.skillVersion ?? globalOptions().skillVersion ?? SKILL_VERSION,
+    warnings: applicationClient?.getWarnings() ?? [],
+    ...(activeOperationId ? { operationId: activeOperationId } : {}),
+    ...(schemaId ? { schemaId } : {}),
+  };
+});
 
 program
   .command("doctor")
@@ -129,42 +152,27 @@ program
 
 program
   .command("capabilities")
-  .description("describe stable machine-readable commands and output contracts")
-  .action(run(async () => {
+  .description("describe stable commands and how to discover their schemas")
+  .option("--operation <operation-id>", "return one operation contract instead of the full catalog")
+  .action(run(async (options: { operation?: string }) => {
+    if (options.operation && !stableOperationFor(options.operation)) {
+      throw new CliError("ARG_INVALID", `Unknown operation: ${options.operation}`);
+    }
     const result = {
+      schemaId: CAPABILITIES_SCHEMA_ID,
+      schemaCommand: ["schema", "get", "capabilities"],
+      manifestVersion: CAPABILITIES_MANIFEST_VERSION,
+      schemaDialect: JSON_SCHEMA_DIALECT,
+      executable: "weread",
       cliVersion: VERSION,
-      schemaVersion: AGENT_SCHEMA_VERSION,
       gatewaySkillVersion: SKILL_VERSION,
       authentication: ["WEREAD_API_KEY", "config"],
-      outputModes: ["human", "json", "agent"],
-      commands: {
-        doctor: "doctor (require data.ready=true before authenticated reads)",
-        search: "search <keyword> --limit <n> [--max-idx <n>]",
-        statsTrend: "stats trend",
-        statsDetail: "stats detail --mode <mode> [--date <YYYY-MM-DD>]",
-        bookInspect: "book inspect <book-or-id>",
-        bookInspectBatch: "book inspect-batch --book-id <id>",
-        shelfSummary: "shelf summary",
-        shelfList: "shelf list [--limit <n>|--all]",
-        notesNotebooks: "notes notebooks [--limit <n>|--all]",
-        notesCorpus: "notes corpus --book-id <id>",
-        reviewsBatch: "reviews batch --book-id <id> --type <type>",
-        discoverRecommend: "discover recommend --limit <n>",
-        discoverSimilar: "discover similar <book-or-id> --limit <n> [--max-idx <n> --session-id <id>]",
-        rawGateway: "api call <api-name>",
-      },
-      constraints: {
-        notesCorpus: {
-          maxBookIdsPerCall: 50,
-          includes: ["highlights", "personal note/review entries"],
-          excludes: ["bookmark positions"],
-          recommendation: "Select a bounded, representative set; batch full-corpus work and back off on rate limits.",
-        },
-        bookInspectBatch: { maxBookIdsPerCall: 20 },
-        reviewsBatch: { defaultReviewsPerBookAndType: 5, defaultMaxContentChars: 800 },
-        stats: STATS_FIELD_GUIDE,
-        normalizedRatings: { books: "0-10", reviews: "0-5" },
-        links: "Only live deepLink values are returned; the CLI does not synthesize weread:// links.",
+      outputModes: ["human", "raw-json", "agent"],
+      operations: operationManifest(options.operation),
+      rawGateway: {
+        argv: ["--json", "api", "call"],
+        stability: "upstream-shaped",
+        schema: null,
       },
       completeness: {
         metaComplete: "Whether the requested fetch/pagination completed, not whether every upstream statistical category is identifiable.",
@@ -172,7 +180,47 @@ program
       },
       safety: { gatewayOperations: "read-only" },
     };
-    printResult(globalOptions(), result, () => JSON.stringify(result, null, 2));
+    printResult(globalOptions(), result, () => {
+      const selected = result.operations[0];
+      if (options.operation && selected) {
+        return [
+          `${selected.id}: ${selected.description}`,
+          `Run: weread ${selected.command.argv.join(" ")}`,
+          `Data schema: weread ${selected.output.dataSchemaCommand.join(" ")}`,
+          `Response schema: weread ${selected.output.schemaCommand.join(" ")}`,
+        ].join("\n");
+      }
+      return [
+        `weread ${VERSION} exposes ${result.operations.length} schema-backed agent operations.`,
+        "Run `weread capabilities --operation <operation-id> --json` for one strict input/output contract.",
+        "Run `weread capabilities --json` only when the full operation catalog is needed.",
+        "Run `weread schema get capabilities` for the manifest's own strict JSON Schema.",
+        "Run `weread schema get <operation-id> --data` for its compact data-payload schema.",
+        "Raw gateway JSON is an upstream-shaped debugging escape hatch and has no stable schema.",
+      ].join("\n");
+    });
+  }));
+
+const schema = program.command("schema").description("inspect bundled JSON Schemas without network access");
+schema
+  .command("list")
+  .description("list schema-backed operation IDs as concise text")
+  .action(run(async () => {
+    console.log(["capabilities", ...STABLE_OPERATIONS.map((operation) => operation.id)].join("\n"));
+  }));
+schema
+  .command("get")
+  .description("print one complete Draft 2020-12 JSON Schema, compact by default")
+  .argument("<operation-id>", "operation ID from capabilities, or capabilities")
+  .option("--data", "print the standalone data-payload schema without the common envelope")
+  .option("--pretty", "indent the schema for human inspection")
+  .action(run(async (operationId: string, options: { data?: boolean; pretty?: boolean }) => {
+    if (options.data && operationId === "capabilities") {
+      throw new CliError("ARG_INVALID", "The capabilities document is already a top-level manifest; omit --data.");
+    }
+    const result = options.data ? dataSchemaFor(operationId) : schemaFor(operationId);
+    if (!result) throw new CliError("ARG_INVALID", `Unknown schema: ${operationId}`);
+    console.log(JSON.stringify(result, null, options.pretty ? 2 : undefined));
   }));
 
 const config = program.command("config").description("manage local credentials");
@@ -239,16 +287,42 @@ book
   .argument("<name>", "book name")
   .action(run(async (name: string) => {
     const resolved = await resolveBook(name);
-    const compact = { query: resolved.query, ...compactBook({
-      bookInfo: {
-        bookId: resolved.bookId,
-        title: resolved.title,
-        author: resolved.author,
-        ...(resolved.deepLink ? { deepLink: resolved.deepLink } : {}),
-        ...(resolved.rating !== undefined ? { newRating: resolved.rating } : {}),
-      },
-    }) };
+    const compact = compactResolvedBook(resolved);
     printResult(globalOptions(), agentData(resolved, compact), () => renderResolvedBook(resolved));
+  }));
+
+book
+  .command("resolve-batch")
+  .description("resolve up to 20 candidate book names in one schema-backed response")
+  .requiredOption("--name <name>", "candidate book name; repeatable, maximum 20", collect, [])
+  .action(run(async (options: { name: string[] }) => {
+    const names = uniqueCandidateNames(options.name);
+    const books: ReturnType<typeof compactResolvedBook>[] = [];
+    const unresolved: Array<{ query: string; code: string; message: string }> = [];
+    for (const name of names) {
+      try {
+        books.push(compactResolvedBook(await resolveBook(name)));
+      } catch (error) {
+        if (!(error instanceof CliError) || error.code !== "NOT_FOUND") throw error;
+        unresolved.push({ query: name, code: error.code, message: error.message });
+      }
+    }
+    const result = {
+      requested: names.length,
+      returned: books.length,
+      unresolvedCount: unresolved.length,
+      books,
+      unresolved,
+    };
+    printResult(
+      globalOptions(),
+      result,
+      () => [
+        ...books.map((entry) => `${entry.query} -> ${entry.title} (${entry.bookId}) [${entry.match}]`),
+        ...unresolved.map((entry) => `${entry.query} -> unresolved (${entry.code})`),
+      ].join("\n"),
+      { warnings: unresolved.length ? [`${unresolved.length} candidate name(s) could not be resolved.`] : [] },
+    );
   }));
 
 book
@@ -389,12 +463,59 @@ Agent semantics:
       const result = await client().call("/readdata/detail", { mode });
       periods.push(summarizeTrendPeriod(result, mode));
     }
-    const output = { timeZone: "Asia/Shanghai", fieldGuide: STATS_FIELD_GUIDE, periods };
+    const output = {
+      timeZone: "Asia/Shanghai",
+      historyRange: statsHistoryRange(periods, currentShanghaiYear()),
+      fieldGuide: STATS_FIELD_GUIDE,
+      periods,
+    };
     printResult(
       globalOptions(),
       output,
       () => renderTrend(periods),
       { warnings: statsWarnings(periods) },
+    );
+  }));
+
+stats
+  .command("history")
+  .description("show a bounded range of compact annual reading periods")
+  .requiredOption("--from <year>", "first calendar year", parseYear)
+  .requiredOption("--to <year>", "last calendar year", parseYear)
+  .addHelpText("after", `
+Agent semantics:
+  returns one schema-backed response instead of requiring one CLI process per year
+  the range is inclusive and limited to 20 years
+  derive an unknown first year from stats trend's overall annual buckets; do not probe arbitrary early years
+  use stats trend separately for the current weekly/monthly/overall snapshot`)
+  .action(run(async (options: { from: number; to: number }) => {
+    if (options.from > options.to) {
+      throw new CliError("ARG_INVALID", "--from must be less than or equal to --to.");
+    }
+    if (options.to - options.from + 1 > 20) {
+      throw new CliError("ARG_INVALID", "Stats history accepts at most 20 calendar years.");
+    }
+    const periods: Array<StatsTrendPeriod & { year: number }> = [];
+    for (let year = options.from; year <= options.to; year += 1) {
+      const result = await client().call("/readdata/detail", {
+        mode: "annually",
+        baseTime: parseStatsDate(`${year}-12-31`),
+      });
+      periods.push({ year, ...summarizeTrendPeriod(result, "annually") });
+    }
+    const annotatedPeriods = annotateHistoryPeriods(periods);
+    const output = {
+      timeZone: "Asia/Shanghai",
+      fromYear: options.from,
+      toYear: options.to,
+      fieldGuide: STATS_FIELD_GUIDE,
+      periods: annotatedPeriods,
+    };
+    printResult(
+      globalOptions(),
+      output,
+      () => renderTrend(periods),
+      { warnings: statsWarnings(annotatedPeriods) },
     );
   }));
 
@@ -416,6 +537,26 @@ notes
       agentData(result, projected),
       () => renderNotebooks(result),
       { complete, warnings },
+    );
+  }));
+
+notes
+  .command("sample")
+  .description("return one deterministic thought-book sample and its coverage")
+  .action(run(async () => {
+    const result = await fetchNotebooks(client(), 100, true);
+    const index = projectNotebooks(result);
+    const sample = sampleThoughtNotebooks(index);
+    const complete = asRecord(result).hasMore !== 1;
+    printResult(
+      globalOptions(),
+      sample,
+      () => [
+        `Selected ${sample.coverage.selectedBooks} of ${sample.index.booksWithThoughts} books with thoughts.`,
+        `Thought coverage: ${sample.coverage.selectedThoughtCount}/${sample.index.totalThoughtCount} (${(sample.coverage.thoughtCoverageRatio * 100).toFixed(1)}%).`,
+        `Book IDs: ${sample.bookIds.join(",")}`,
+      ].join("\n"),
+      { complete },
     );
   }));
 
@@ -450,42 +591,59 @@ notes
   .command("corpus")
   .description("return a compact corpus of personal highlights and thoughts")
   .requiredOption("--book-id <id>", "bookId to include; repeatable, maximum 50", collect, [])
+  .option("--view <view>", "full|thoughts; thoughts omits standalone source-book highlights", "full")
   .addHelpText("after", `
 Content scope:
   exports highlights plus personal note/review entries, but not bookmark positions
   thoughts[].content contains the reader's own words
   thoughts[].quotedText/contextText contains source-book context, not the reader's words
   for large libraries, select a representative set or run batches with backoff`)
-  .action(run(async (options: { bookId: string[] }) => {
+  .action(run(async (options: { bookId: string[]; view: string }) => {
+    if (!["full", "thoughts"].includes(options.view)) {
+      throw new CliError("ARG_INVALID", "View must be full or thoughts.");
+    }
     const ids = uniqueBookIds(options.bookId);
-    const books: ReturnType<typeof projectNotes>[] = [];
+    const fullBooks: ReturnType<typeof projectNotes>[] = [];
     let complete = true;
     for (const bookId of ids) {
       const projected = projectNotes(await exportNotes(bookId), false);
-      books.push(projected);
+      fullBooks.push(projected);
       complete = complete && projected.complete;
     }
+    const books = options.view === "thoughts"
+      ? fullBooks.map(({ highlights: _highlights, ...book }) => book)
+      : fullBooks;
+    const sourceHighlights = fullBooks.reduce((sum, item) => sum + item.counts.highlights, 0);
+    const sourceThoughts = fullBooks.reduce((sum, item) => sum + item.counts.thoughts, 0);
+    const returnedHighlights = options.view === "thoughts" ? 0 : sourceHighlights;
     const output = {
+      view: options.view,
       contentScope: {
-        includes: ["highlights", "personal note/review entries"],
-        excludes: ["bookmark positions"],
+        includes: options.view === "thoughts"
+          ? ["personal note/review entries"]
+          : ["highlights", "personal note/review entries"],
+        excludes: options.view === "thoughts"
+          ? ["bookmark positions", "standalone source-book highlights"]
+          : ["bookmark positions"],
         personalWordsField: "books[].thoughts[].content",
         sourceContextFields: ["books[].thoughts[].quotedText", "books[].thoughts[].contextText"],
         maxBookIdsPerCall: 50,
       },
       books,
       totals: {
-        books: books.length,
-        highlights: books.reduce((sum, item) => sum + item.counts.highlights, 0),
-        thoughts: books.reduce((sum, item) => sum + item.counts.thoughts, 0),
-        thoughtsWithText: books.reduce((sum, item) => sum + item.counts.thoughtsWithText, 0),
-        contextOnlyThoughts: books.reduce((sum, item) => sum + item.counts.contextOnlyThoughts, 0),
-        ratingOnlyThoughts: books.reduce((sum, item) => sum + item.counts.ratingOnlyThoughts, 0),
-        emptyThoughts: books.reduce((sum, item) => sum + item.counts.emptyThoughts, 0),
-        exportedItems: books.reduce((sum, item) => sum + item.counts.total, 0),
+        books: fullBooks.length,
+        sourceHighlights,
+        sourceThoughts,
+        returnedHighlights,
+        returnedThoughts: sourceThoughts,
+        returnedItems: returnedHighlights + sourceThoughts,
+        thoughtsWithText: fullBooks.reduce((sum, item) => sum + item.counts.thoughtsWithText, 0),
+        contextOnlyThoughts: fullBooks.reduce((sum, item) => sum + item.counts.contextOnlyThoughts, 0),
+        ratingOnlyThoughts: fullBooks.reduce((sum, item) => sum + item.counts.ratingOnlyThoughts, 0),
+        emptyThoughts: fullBooks.reduce((sum, item) => sum + item.counts.emptyThoughts, 0),
       },
     };
-    printResult(globalOptions(), output, () => renderNotesCorpus(books), { complete });
+    printResult(globalOptions(), output, () => renderNotesCorpus(fullBooks), { complete });
   }));
 
 notes
@@ -622,6 +780,16 @@ function globalOptions(): GlobalOptions {
   return program.opts<GlobalOptions>();
 }
 
+function operationIdFor(command: Command): string {
+  const names: string[] = [];
+  let current: Command | null = command;
+  while (current?.parent) {
+    names.unshift(current.name());
+    current = current.parent;
+  }
+  return names.join(".");
+}
+
 function client(): WereadClient {
   applicationClient ??= new WereadClient({
     ...(globalOptions().skillVersion ? { skillVersion: globalOptions().skillVersion } : {}),
@@ -650,6 +818,14 @@ function parseNonNegativeInt(value: string): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0) {
     throw new CliError("ARG_INVALID", `Expected a non-negative integer, got ${value}`);
+  }
+  return parsed;
+}
+
+function parseYear(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1900 || parsed > 2100) {
+    throw new CliError("ARG_INVALID", `Expected a calendar year from 1900 to 2100, got ${value}`);
   }
   return parsed;
 }
@@ -691,12 +867,26 @@ function uniqueBookIds(values: string[], maximum = 50): string[] {
   return ids;
 }
 
+function uniqueCandidateNames(values: string[]): string[] {
+  const names = [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+  if (!names.length) throw new CliError("ARG_INVALID", "Provide at least one --name.");
+  if (names.length > 20) throw new CliError("ARG_INVALID", "At most 20 candidate names may be resolved at once.");
+  return names;
+}
+
 function parseStatsDate(value: string): number {
   try {
     return parsePeriodDate(value);
   } catch (error) {
     throw new CliError("ARG_INVALID", error instanceof Error ? error.message : String(error));
   }
+}
+
+function currentShanghaiYear(): number {
+  return Number(new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+  }).format(new Date()));
 }
 
 function limitArrayField(result: unknown, field: string, limit: number): UnknownRecord {
@@ -763,12 +953,15 @@ interface ResolvedBook {
   bookId: string;
   title: string;
   author: string;
+  match: "exact-title" | "first-search-result";
   rating?: number;
   deepLink?: string;
   candidates: unknown[];
 }
 
 async function resolveBook(query: string): Promise<ResolvedBook> {
+  query = query.trim();
+  if (!query) throw new CliError("ARG_INVALID", "Book name cannot be empty.");
   const result = await client().call("/store/search", { keyword: query, scope: 10, count: 10 });
   const candidates = searchBooks(result);
   const exact = candidates.find((candidate) => text(asRecord(asRecord(candidate).bookInfo).title) === query);
@@ -784,9 +977,26 @@ async function resolveBook(query: string): Promise<ResolvedBook> {
     bookId,
     title: text(bookInfo.title),
     author: text(bookInfo.author),
+    match: exact ? "exact-title" : "first-search-result",
     ...(rating !== undefined ? { rating } : {}),
     ...(text(bookInfo.deepLink) ? { deepLink: text(bookInfo.deepLink) } : {}),
     candidates,
+  };
+}
+
+function compactResolvedBook(resolved: ResolvedBook) {
+  return {
+    query: resolved.query,
+    match: resolved.match,
+    ...compactBook({
+      bookInfo: {
+        bookId: resolved.bookId,
+        title: resolved.title,
+        author: resolved.author,
+        ...(resolved.deepLink ? { deepLink: resolved.deepLink } : {}),
+        ...(resolved.rating !== undefined ? { newRating: resolved.rating } : {}),
+      },
+    }),
   };
 }
 
@@ -962,11 +1172,13 @@ function renderBookInspection(value: unknown): string {
   const progress = asRecord(result.progress);
   const shelf = asRecord(result.shelf);
   const notebook = asRecord(result.notebook);
+  const progressText = progress.percent === null ? "未记录" : `${progress.percent ?? 0}%`;
+  const readingText = progress.readingSeconds === null ? "未记录" : formatDuration(progress.readingSeconds);
   return [
     `${text(book.title) || text(book.bookId)} - ${text(book.author) || "-"}`,
     `可读: ${availability.readable ? "是" : "否"}${availability.reason ? ` (${availability.reason})` : ""}`,
     `章节: ${chapters.count ?? 0} · 免费 ${chapters.freeCount ?? 0} · 已购 ${chapters.purchasedCount ?? 0}`,
-    `进度: ${progress.percent ?? 0}% · 累计 ${formatDuration(progress.readingSeconds)}`,
+    `进度: ${progressText} · 累计 ${readingText}`,
     `书架: ${shelf.present ? "有" : "无"} · 笔记本: ${notebook.present ? "有" : "无"}`,
     book.deepLink ? `打开: ${text(book.deepLink)}` : undefined,
   ].filter((line) => line !== undefined).join("\n");

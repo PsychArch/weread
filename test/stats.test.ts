@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parsePeriodDate, statsWarnings, summarizeStats, summarizeTrendPeriod } from "../src/stats.js";
+import { annotateHistoryPeriods, parsePeriodDate, statsHistoryRange, statsWarnings, summarizeStats, summarizeTrendPeriod } from "../src/stats.js";
 
 describe("stats summaries", () => {
   it("keeps trend fields while removing bulky book metadata", () => {
@@ -118,5 +118,55 @@ describe("stats summaries", () => {
     expect(parsePeriodDate("2026")).toBe(1767196800);
     expect(parsePeriodDate("2026-07")).toBe(1782835200);
     expect(() => parsePeriodDate("2026-02-30")).toThrow("Invalid calendar date");
+  });
+
+  it("derives explicit history bounds from the returned overall buckets", () => {
+    const overall = summarizeTrendPeriod({
+      readTimes: {
+        "1514736000": 0,
+        "1546272000": 0,
+        "1577808000": 42,
+        "1609430400": 100,
+      },
+    }, "overall");
+
+    expect(statsHistoryRange([overall], 2026)).toEqual({
+      firstNonzeroYear: 2020,
+      lastCompleteYear: 2025,
+      currentYear: 2026,
+      source: "stats.trend.overall.buckets",
+    });
+  });
+
+  it("derives schema-backed annual comparisons without session claims", () => {
+    const periods = annotateHistoryPeriods([
+      {
+        year: 2023,
+        ...summarizeTrendPeriod({ totalReadTime: 3600, readDays: 1 }, "annually"),
+      },
+      {
+        year: 2024,
+        ...summarizeTrendPeriod({ totalReadTime: 7200, readDays: 2 }, "annually"),
+      },
+    ]);
+
+    expect(periods[0]?.historyAnalysis).toEqual({
+      calendarDays: 365,
+      readingDayCoverage: { ratio: 1 / 365, percent: 100 / 365, basis: "calendar-year" },
+      accumulatedReadTimePerReadingDay: { seconds: 3600, basis: "reading-day-total-not-session" },
+      totalReadTimeChange: null,
+    });
+    expect(periods[1]?.historyAnalysis).toEqual({
+      calendarDays: 366,
+      readingDayCoverage: { ratio: 2 / 366, percent: 200 / 366, basis: "calendar-year" },
+      accumulatedReadTimePerReadingDay: { seconds: 3600, basis: "reading-day-total-not-session" },
+      totalReadTimeChange: {
+        previousYear: 2023,
+        ratio: 1,
+        percent: 100,
+        direction: "up",
+        basis: "total-read-time",
+      },
+    });
   });
 });
