@@ -1,33 +1,71 @@
 # weread
 
-An unofficial CLI for reading data from the WeRead Agent Gateway. It provides
-human-friendly terminal output, raw gateway JSON for scripts, and compact,
-versioned JSON for agents.
+English · [简体中文](https://github.com/PsychArch/weread/blob/main/README.zh-CN.md)
 
-The CLI covers book search and metadata, shelf entries, reading progress and
-statistics, personal notes and highlights, public reviews, and recommendations.
-It is read-only: interpretation stays outside the CLI so callers receive
-deterministic data rather than hidden product opinions.
+An unofficial, read-only CLI that makes WeRead data easier to explore from a
+terminal or with an AI agent.
+
+`weread` can search the catalog, inspect a shelf, follow reading progress, read
+statistics, and collect notes or public reviews. Its agent mode goes a step
+further: instead of forwarding an entire gateway response, it returns a smaller
+versioned projection built for analysis.
 
 This project is not affiliated with or endorsed by Tencent or WeRead.
 
-## Install
+## Why we made it
+
+Tencent publishes the official
+[WeChatReading](https://github.com/Tencent/WeChatReading) project. It is the
+protocol reference for the WeRead Agent Gateway and documents its requests,
+responses, pagination rules, and field semantics in Markdown.
+
+Those documents are valuable, and this project depends on them. Markdown is
+well suited to explaining an interface to a reader, but it is not the same as a
+machine-readable contract such as OpenAPI. A direct caller still has to turn the
+prose into code, account for the pagination style of each endpoint, and remember
+details that are easy to miss. For example, some durations are expressed in
+seconds, and `noteCount` is narrower than its name may suggest.
+
+That is not a shortcoming of the official project; the documentation and this
+CLI simply serve different roles. The official repository describes the
+gateway. `weread` makes those instructions executable and gives callers a
+consistent local interface.
+
+The result is useful for ordinary terminal work, but the main motivation is
+agent use. An agent should be able to study several years of reading activity or
+a large notebook collection without spending most of its context window on
+transport details. It should also know when a result is incomplete instead of
+quietly treating the first page as the whole library.
+
+## What it can help with
+
+The CLI can answer direct questions such as “what is on my shelf?” or “how long
+did I read this month?” It also provides the evidence for broader analysis:
+
+- how reading habits changed over several years;
+- which subjects and authors receive sustained attention;
+- what themes recur in highlights and personal thoughts;
+- which books may fill a gap in the reader's current interests.
+
+`weread` retrieves and organizes the evidence. Interpretation stays with the
+person or agent using it. Gateway operations are read-only, so exploring a
+reading history does not alter it.
+
+## Quick start
+
+Node.js 22.12 or newer is required. Install the CLI with pnpm:
 
 ```bash
 pnpm add --global @psycharch/weread
 ```
 
-The installed executable is `weread`. Node.js 22.12 or newer is required.
-
-## Authenticate
-
-Get a WeRead API key from the
-[official WeRead Skills page](https://weread.qq.com/r/weread-skills). For
-temporary or automated use, export it in the current process:
+Get an API key from the official
+[WeRead Skills page](https://weread.qq.com/r/weread-skills), then export it in
+the current process:
 
 ```bash
 export WEREAD_API_KEY="wrk-..."
-weread --agent doctor
+weread doctor
 ```
 
 For persistent local use:
@@ -37,47 +75,39 @@ weread config set-key "wrk-..."
 weread doctor
 ```
 
-`WEREAD_API_KEY` takes precedence over the config file. The CLI never loads
-`.env` files automatically, never prints a full key, and stores local config
-with user-only permissions. `doctor` exits nonzero unless credentials are
-present and the gateway is reachable; structured output also reports
-`data.ready`.
+`WEREAD_API_KEY` takes precedence over the saved configuration. The CLI does
+not load `.env` files automatically, never prints a full key, and stores its
+local configuration with user-only permissions.
 
-## Human commands
+Once `doctor` reports that the gateway is ready, try a few commands:
 
 ```bash
 weread search "基因传" --scope book --limit 5
-weread book inspect 922224
-weread book inspect-batch --book-id 922224 --book-id 3300045871
 weread shelf summary
-weread shelf list --all
-weread stats detail --mode monthly --view summary
 weread stats detail --mode annually --date 2025 --view summary
-weread notes notebooks --all
 weread notes export 922224 --format markdown --output notes.md
-weread reviews list 922224 --type recommend --limit 10
 weread discover recommend --limit 12
 ```
 
-Search, public-review, and recommendation commands expose the gateway's
-pagination inputs (`--max-idx`, `--synckey`, and `--session-id` where
-applicable). Returned links are shown only when the live gateway supplies a
-`deepLink`; the CLI does not invent `weread://` URLs.
+The default output is intended for a person at a terminal. Dates, durations,
+ratings, and progress are formatted for reading rather than preserved merely
+because the server happened to return them that way.
 
-## Agent commands
+## Agent mode
 
-Put `--agent` before the command to receive compact normalized JSON:
+Place `--agent` before a command to receive compact normalized JSON:
 
 ```bash
 weread --agent stats trend
 weread --agent book inspect 922224
-weread --agent book inspect-batch --book-id 922224 --book-id 3300045871
+weread --agent shelf list --all
 weread --agent notes corpus --book-id 922224 --book-id 3300045871
 weread --agent reviews batch --book-id 922224 --type recommend,latest --limit 3
-weread --agent shelf list --all
 ```
 
-Every successful agent response has the same envelope:
+Agent mode is not just raw JSON without terminal colors. It extracts fields that
+matter for analysis, normalizes awkward values, and combines requests for common
+workflows. Every successful response uses the same envelope:
 
 ```json
 {
@@ -93,75 +123,125 @@ Every successful agent response has the same envelope:
 }
 ```
 
-Check `ok`, `meta.complete`, and `warnings` before drawing conclusions. A
-successful diagnostic command can still report `data.ready=false`. Errors are
-JSON on stderr and exit nonzero. Discover the stable command and field surface
-with:
+Before drawing conclusions, an agent should inspect `ok`, `meta.complete`, and
+`warnings`. A request may succeed while still carrying a pagination limit or a
+data-quality caveat.
+
+The complete command surface and field guidance are discoverable without
+reading this README:
 
 ```bash
 weread capabilities --json
 ```
 
-## Output contracts
+### Reading trends
 
-`--json` preserves live gateway response shapes and values for compatibility.
-`--agent` selects a smaller, versioned projection: book ratings are normalized
-to a 0-10 scale, review ratings to a 0-5 scale, timestamps to ISO strings, and
-durations remain seconds. This distinction matters because live gateway fields
-can differ from prose documentation.
+```bash
+weread --agent stats trend
+weread --agent stats detail --mode annually --date 2025
+```
 
-`stats trend` and agent-mode `stats detail` include a `fieldGuide`. Durations
-are seconds, `dayAverageReadTime` is averaged across natural calendar days, and
-`compare` is the ratio change in that average (`0.2` means up 20%). Time buckets
-are daily for weekly/monthly data, monthly for annual data, and yearly for
-overall data. Use `totalReadTime` as authoritative when a warning says the
-read/listen breakdown is inconsistent.
+`stats trend` prepares several periods for comparison. Statistical responses
+include a `fieldGuide` that explains units and comparison semantics, leaving
+less room for an agent to infer meaning from field names alone.
 
-`notes notebooks --all` fetches every cursor page. Without `--all`, a bounded
-result sets `meta.complete=false` when more pages remain. A notes corpus accepts
-at most 50 book IDs per call. It exports highlights and personal note/review
-entries, but bookmark positions are not exportable. In compact output, the
-reader's own words are in `thoughts[].content`; `quotedText` and `contextText`
-are source-book context.
+### Notes and personal thoughts
 
-Public-review compact output defaults to 800 characters per review and marks
-truncation. Use `--max-content-chars` to adjust it. Personalized discovery is a
-candidate source, not evidence of a knowledge gap; verify shortlisted titles
-with `book inspect` or `book inspect-batch`.
+Start with the full notebook index, then choose a relevant set of books for the
+corpus:
+
+```bash
+weread --agent notes notebooks --all
+weread --agent notes corpus --book-id 922224 --book-id 3300045871
+```
+
+The compact corpus distinguishes quoted book text from the reader's own words.
+This matters when an agent is looking for recurring ideas or describing the
+reader's point of view.
+
+### Recommendations with verification
+
+Personalized discovery is useful as a source of candidates:
+
+```bash
+weread --agent discover recommend --limit 12
+```
+
+Before presenting a shortlist, inspect the books together:
+
+```bash
+weread --agent book inspect-batch --book-id 922224 --book-id 3300045871
+```
+
+Inspection checks availability, shelf presence, progress, and note presence.
+The final recommendation remains an agent decision, where the reader's goals
+and existing knowledge can be considered.
+
+## Output and data boundaries
+
+Without a structured-output flag, `weread` prints concise terminal text.
+`--json` preserves the live gateway response shape for compatibility and
+debugging. `--agent` selects the smaller versioned contract described above.
+The raw response remains available; it simply does not need to attend every
+conversation.
+
+Book ratings in agent mode use a 0–10 scale, review ratings use 0–5, timestamps
+are converted to ISO strings, and durations remain seconds. Statistics include
+their own field guidance. In particular, `dayAverageReadTime` is based on
+natural calendar days rather than active reading days, and `compare` is the
+ratio change in that average. A value of `0.2` means an increase of 20%.
+
+`notes notebooks --all` follows every cursor page. A bounded result sets
+`meta.complete=false` when more pages remain. One notes corpus accepts up to 50
+book IDs. Bookmark positions contribute to WeRead's notebook counts but are not
+exportable as note content. In compact output, `thoughts[].content` contains the
+reader's wording; `quotedText` and `contextText` come from the book.
+
+Public-review output for agents is bounded and reports truncation. Returned
+links are included only when the gateway supplies a `deepLink`; the CLI does not
+construct `weread://` links on its own.
 
 ## Raw gateway access
 
-Use the escape hatch only when a high-level command is missing:
+When a high-level command does not cover an endpoint, the raw gateway remains
+available:
 
 ```bash
 weread --json api call /store/search --param keyword=基因传 --param scope=10
 ```
 
-Raw gateway responses may be large. Request metadata (`api_name` and
-`skill_version`) is controlled by the CLI and cannot be overridden through
+Raw responses may be large. Request metadata such as `api_name` and
+`skill_version` is managed by the CLI and cannot be overridden through
 `--param`.
 
-## Reliability
+## Where this project fits
 
-The default gateway protocol is `1.0.5`. Override it with
-`WEREAD_SKILL_VERSION` or `--skill-version`; a compatible same-major upgrade is
-negotiated once and reported in `warnings`. Read requests retry transient
-network errors, HTTP 429/5xx, the gateway's rate-limit response, empty success
-bodies, and malformed responses.
+The WeRead community includes SDKs, dashboards, MCP servers, note-sync tools,
+and reading-advisor skills. Each is useful for a different kind of work. This
+project takes a narrower role: it is a portable data layer for environments
+that can run a command and consume its output.
 
-## Official API reference and licensing
+If an application needs an embeddable SDK, a graphical interface, or direct MCP
+integration, another project may be a better fit. `weread` is intended for
+people who want a composable CLI and for agents that benefit from compact
+evidence, explicit completeness, and deterministic behavior.
+
+## Reliability and protocol compatibility
+
+The default gateway protocol is `1.0.5`. It can be overridden with
+`WEREAD_SKILL_VERSION` or `--skill-version`. A compatible same-major upgrade is
+negotiated once and reported in `warnings`.
+
+Read requests retry transient network errors, HTTP 429/5xx responses, gateway
+rate limits, empty success bodies, and malformed responses. `doctor` exits
+nonzero unless credentials are present and the gateway is reachable;
+structured output also reports `data.ready`.
 
 Protocol semantics are cross-checked against Tencent's
-[WeChatReading repository](https://github.com/Tencent/WeChatReading), which is
-Copyright © 2026 Tencent and licensed under
-[Apache-2.0](https://github.com/Tencent/WeChatReading/blob/main/LICENSE). The
-live Agent Gateway remains the canonical source for wire request and response
-formats. When its behavior differs from the repository documentation, this CLI
-follows the observed gateway behavior and covers it with live validation.
-
-The code in this repository is separately licensed under MIT. References to
-WeRead, WeChat, and Tencent are solely to identify compatibility with their
-service and do not imply sponsorship or endorsement.
+[WeChatReading](https://github.com/Tencent/WeChatReading) repository. The live
+Agent Gateway remains the canonical source for wire behavior. When observed
+behavior differs from the prose documentation, this CLI follows the live
+response and covers it with validation.
 
 ## Development
 
@@ -170,13 +250,10 @@ pnpm install --frozen-lockfile
 pnpm run verify
 ```
 
-`verify` type-checks, builds, runs unit and built-CLI tests, creates the npm
-artifact, checks its exact file list, and scans it for local paths and API-key
-shaped values. See the
-[release runbook](https://github.com/PsychArch/weread/blob/main/RELEASING.md)
-for the GitHub/npm flow and the
-[security policy](https://github.com/PsychArch/weread/blob/main/SECURITY.md)
-for private vulnerability reporting.
+`verify` type-checks, builds, runs the test suite, creates the npm artifact, and
+scans it for unexpected files, local paths, or API-key-shaped values. Release
+instructions are in [RELEASING.md](RELEASING.md), and security reports are
+covered by [SECURITY.md](SECURITY.md).
 
 Maintainers can run the bounded, read-only gateway suite with an exported key:
 
@@ -185,5 +262,11 @@ WEREAD_API_KEY="wrk-..." pnpm run test:live
 ```
 
 ## License
+
+Tencent's WeChatReading repository is Copyright © 2026 Tencent and licensed
+under [Apache-2.0](https://github.com/Tencent/WeChatReading/blob/main/LICENSE).
+This project is separately licensed under MIT. References to WeRead, WeChat,
+and Tencent identify service compatibility and do not imply sponsorship or
+endorsement.
 
 MIT © PsychArch

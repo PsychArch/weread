@@ -17,6 +17,7 @@ try {
   const expected = [
     "LICENSE",
     "README.md",
+    "README.zh-CN.md",
     "dist/cli.js",
     "dist/cli.js.map",
     "package.json",
