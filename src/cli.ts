@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 import { writeFile } from "node:fs/promises";
-import { Command } from "commander";
-import { JsonObject, JsonValue, SKILL_VERSION, WereadClient, parseParam } from "./client.js";
+import { Command, CommanderError } from "commander";
+import { JsonObject, JsonValue, WereadClient, parseParam, resolveGatewaySkillVersion } from "./client.js";
 import { clearConfig, configPath, findCredential, readConfig, redactKey, validateApiKey, writeConfig } from "./config.js";
+import { decodeCorpusCursor, encodeCorpusCursor } from "./corpus-cursor.js";
 import {
   asArray,
   asRecord,
   compactBook,
+  fetchCorpusNotebookPage,
   fetchNotebooks,
   fetchNotes,
   inspectBook,
@@ -23,25 +25,20 @@ import {
   projectSearch,
   projectShelfEntries,
   projectSimilar,
-  sampleThoughtNotebooks,
   text,
 } from "./domain.js";
 import { CliError } from "./errors.js";
 import { formatDate, formatDuration, formatRating, formatStars, truncate } from "./format.js";
-import { GlobalOptions, printError, printResult, setAgentMetadataProvider } from "./output.js";
+import { GlobalOptions, printError, printResult, setMetadataProvider } from "./output.js";
 import {
-  CAPABILITIES_MANIFEST_VERSION,
-  CAPABILITIES_SCHEMA_ID,
-  JSON_SCHEMA_DIALECT,
-  STABLE_OPERATIONS,
-  dataSchemaFor,
-  operationManifest,
-  schemaFor,
+  describeOperation,
+  INVOCATION_ERROR_OPERATION_ID,
+  operationsCatalog,
   schemaIdForOperation,
-  stableOperationFor,
+  STABLE_OPERATIONS,
 } from "./schemas.js";
 import {
-  STATS_FIELD_GUIDE,
+  STATS_HISTORY_MIN_YEAR,
   StatsTrendPeriod,
   annotateHistoryPeriods,
   parsePeriodDate,
@@ -79,22 +76,32 @@ program
   .name("weread")
   .description("Human- and agent-friendly CLI for the WeRead Agent Gateway.")
   .version(VERSION)
-  .option("--json", "emit raw-compatible JSON; use --agent for a stable schema-backed contract")
-  .option("--agent", "emit a compact, versioned JSON envelope for agents")
+  .option("--json", "emit the stable, schema-backed JSON response")
+  .option("--agent", "compatibility alias for --json")
+  .option("--raw", "emit unwrapped, unstable JSON")
   .option("--skill-version <version>", "override the gateway protocol version");
+program.exitOverride();
+program.configureOutput({
+  writeErr: (value) => {
+    if (!machineOutputRequested()) process.stderr.write(value);
+  },
+});
 
 let applicationClient: WereadClient | undefined;
 let activeOperationId: string | undefined;
 program.hook("preAction", (_rootCommand, actionCommand) => {
   activeOperationId = operationIdFor(actionCommand);
 });
-setAgentMetadataProvider(() => {
-  const schemaId = schemaIdForOperation(activeOperationId);
+setMetadataProvider(() => {
+  const operationId = schemaIdForOperation(activeOperationId)
+    ? activeOperationId!
+    : INVOCATION_ERROR_OPERATION_ID;
+  const schemaId = schemaIdForOperation(operationId)!;
   return {
-    gatewaySkillVersion: applicationClient?.skillVersion ?? globalOptions().skillVersion ?? SKILL_VERSION,
+    gatewaySkillVersion: effectiveGatewaySkillVersion(),
     warnings: applicationClient?.getWarnings() ?? [],
-    ...(activeOperationId ? { operationId: activeOperationId } : {}),
-    ...(schemaId ? { schemaId } : {}),
+    operationId,
+    schemaId,
   };
 });
 
@@ -107,7 +114,7 @@ program
     const result: UnknownRecord = {
       ready: false,
       version: VERSION,
-      gatewaySkillVersion: globalOptions().skillVersion ?? process.env.WEREAD_SKILL_VERSION?.trim() ?? SKILL_VERSION,
+      gatewaySkillVersion: effectiveGatewaySkillVersion(),
       credential: {
         configured: Boolean(credential),
         source: credential?.source ?? null,
@@ -125,7 +132,7 @@ program
       try {
         await client().call("/_list");
         result.ready = true;
-        result.gatewaySkillVersion = client().skillVersion;
+        result.gatewaySkillVersion = effectiveGatewaySkillVersion();
         result.gateway = { checked: true, reachable: true };
       } catch (error) {
         result.gateway = {
@@ -147,80 +154,37 @@ program
       else lines.push("gateway: skipped (missing credential)");
       return lines.join("\n");
     });
-    if (result.ready !== true) process.exitCode = 1;
   }));
 
 program
-  .command("capabilities")
-  .description("describe stable commands and how to discover their schemas")
-  .option("--operation <operation-id>", "return one operation contract instead of the full catalog")
-  .action(run(async (options: { operation?: string }) => {
-    if (options.operation && !stableOperationFor(options.operation)) {
-      throw new CliError("ARG_INVALID", `Unknown operation: ${options.operation}`);
-    }
-    const result = {
-      schemaId: CAPABILITIES_SCHEMA_ID,
-      schemaCommand: ["schema", "get", "capabilities"],
-      manifestVersion: CAPABILITIES_MANIFEST_VERSION,
-      schemaDialect: JSON_SCHEMA_DIALECT,
-      executable: "weread",
-      cliVersion: VERSION,
-      gatewaySkillVersion: SKILL_VERSION,
-      authentication: ["WEREAD_API_KEY", "config"],
-      outputModes: ["human", "raw-json", "agent"],
-      operations: operationManifest(options.operation),
-      rawGateway: {
-        argv: ["--json", "api", "call"],
-        stability: "upstream-shaped",
-        schema: null,
-      },
-      completeness: {
-        metaComplete: "Whether the requested fetch/pagination completed, not whether every upstream statistical category is identifiable.",
-        warnings: "Protocol retries and data-quality caveats that must be checked before analysis.",
-      },
-      safety: { gatewayOperations: "read-only" },
-    };
+  .command("operations")
+  .description("list stable operations available to humans and programs")
+  .action(run(async () => {
+    const result = operationsCatalog();
     printResult(globalOptions(), result, () => {
-      const selected = result.operations[0];
-      if (options.operation && selected) {
-        return [
-          `${selected.id}: ${selected.description}`,
-          `Run: weread ${selected.command.argv.join(" ")}`,
-          `Data schema: weread ${selected.output.dataSchemaCommand.join(" ")}`,
-          `Response schema: weread ${selected.output.schemaCommand.join(" ")}`,
-        ].join("\n");
-      }
       return [
-        `weread ${VERSION} exposes ${result.operations.length} schema-backed agent operations.`,
-        "Run `weread capabilities --operation <operation-id> --json` for one strict input/output contract.",
-        "Run `weread capabilities --json` only when the full operation catalog is needed.",
-        "Run `weread schema get capabilities` for the manifest's own strict JSON Schema.",
-        "Run `weread schema get <operation-id> --data` for its compact data-payload schema.",
-        "Raw gateway JSON is an upstream-shaped debugging escape hatch and has no stable schema.",
+        ...result.operations.map((operation) => `${operation.id}\t${operation.description}`),
+        "",
+        "Describe one operation: weread --json operation describe <operation-id>",
       ].join("\n");
     });
   }));
 
-const schema = program.command("schema").description("inspect bundled JSON Schemas without network access");
-schema
-  .command("list")
-  .description("list schema-backed operation IDs as concise text")
-  .action(run(async () => {
-    console.log(["capabilities", ...STABLE_OPERATIONS.map((operation) => operation.id)].join("\n"));
-  }));
-schema
-  .command("get")
-  .description("print one complete Draft 2020-12 JSON Schema, compact by default")
-  .argument("<operation-id>", "operation ID from capabilities, or capabilities")
-  .option("--data", "print the standalone data-payload schema without the common envelope")
-  .option("--pretty", "indent the schema for human inspection")
-  .action(run(async (operationId: string, options: { data?: boolean; pretty?: boolean }) => {
-    if (options.data && operationId === "capabilities") {
-      throw new CliError("ARG_INVALID", "The capabilities document is already a top-level manifest; omit --data.");
-    }
-    const result = options.data ? dataSchemaFor(operationId) : schemaFor(operationId);
-    if (!result) throw new CliError("ARG_INVALID", `Unknown schema: ${operationId}`);
-    console.log(JSON.stringify(result, null, options.pretty ? 2 : undefined));
+const operation = program.command("operation").description("inspect one stable operation");
+operation
+  .command("describe")
+  .description("return invocation details and the complete response schema")
+  .argument("<operation-id>", "operation ID from `weread operations`")
+  .action(run(async (operationId: string) => {
+    const result = describeOperation(operationId);
+    if (!result) throw new CliError("ARG_INVALID", `Unknown operation: ${operationId}`);
+    printResult(globalOptions(), result, () => [
+      `${result.id}: ${result.description}`,
+      `Run: ${result.invocation.executable} ${result.invocation.argv.join(" ")}`,
+      `JSON: ${result.invocation.executable} ${result.invocation.jsonArgv.join(" ")}`,
+      `Side effects: ${result.sideEffects}`,
+      `Pagination: ${result.pagination.mode}`,
+    ].join("\n"));
   }));
 
 const config = program.command("config").description("manage local credentials");
@@ -236,7 +200,11 @@ config
   .description("store WeRead API key in local config")
   .argument("<api-key>", "API key beginning with wrk-")
   .action(run(async (apiKey: string) => {
-    validateApiKey(apiKey);
+    try {
+      validateApiKey(apiKey);
+    } catch (error) {
+      throw new CliError("ARG_INVALID", error instanceof Error ? error.message : String(error));
+    }
     await writeConfig({ apiKey });
     printResult(globalOptions(), { ok: true, path: configPath(), apiKey: redactKey(apiKey) }, () => `Saved API key to ${configPath()}`);
   }));
@@ -268,16 +236,22 @@ program
   .option("--scope <scope>", "all|book|web-novel|audio|author|fulltext|booklist|mp|article", "book")
   .option("--limit <n>", "result count", parsePositiveInt, 10)
   .option("--max-idx <n>", "pagination offset from the previous response", parseNonNegativeInt, 0)
-  .action(run(async (keyword: string, options: { scope: string; limit: number; maxIdx: number }) => {
+  .option("--session-id <id>", "search session ID from the previous response")
+  .action(run(async (keyword: string, options: { scope: string; limit: number; maxIdx: number; sessionId?: string }) => {
     const scope = scopeNumber(options.scope);
     const result = await client().call("/store/search", {
       keyword,
       scope,
       count: options.limit,
       maxIdx: options.maxIdx,
+      ...(options.sessionId ? { sid: options.sessionId } : {}),
     });
     const raw = limitSearchRaw(result, options.limit);
-    printResult(globalOptions(), agentData(raw, projectSearch(result, options.limit)), () => renderSearch(raw));
+    printResult(
+      globalOptions(),
+      outputData(raw, projectSearch(result, { keyword, scope: options.scope, limit: options.limit })),
+      () => renderSearch(raw),
+    );
   }));
 
 const book = program.command("book").description("book information and reading progress");
@@ -288,7 +262,7 @@ book
   .action(run(async (name: string) => {
     const resolved = await resolveBook(name);
     const compact = compactResolvedBook(resolved);
-    printResult(globalOptions(), agentData(resolved, compact), () => renderResolvedBook(resolved));
+    printResult(globalOptions(), outputData(resolved, compact), () => renderResolvedBook(resolved));
   }));
 
 book
@@ -332,7 +306,7 @@ book
   .action(run(async (bookOrId: string) => {
     const bookId = await bookIdFromInput(bookOrId);
     const result = await client().call("/book/info", { bookId });
-    printResult(globalOptions(), agentData(result, projectBookInfo(result)), () => renderBookInfo(result));
+    printResult(globalOptions(), outputData(result, projectBookInfo(result)), () => renderBookInfo(result));
   }));
 
 book
@@ -342,7 +316,7 @@ book
   .action(run(async (bookOrId: string) => {
     const bookId = await bookIdFromInput(bookOrId);
     const result = await client().call("/book/chapterinfo", { bookId });
-    printResult(globalOptions(), agentData(result, projectChapters(result, bookId)), () => renderChapters(result));
+    printResult(globalOptions(), outputData(result, projectChapters(result, bookId)), () => renderChapters(result));
   }));
 
 book
@@ -352,12 +326,12 @@ book
   .action(run(async (bookOrId: string) => {
     const bookId = await bookIdFromInput(bookOrId);
     const result = await client().call("/book/getprogress", { bookId });
-    printResult(globalOptions(), agentData(result, projectProgress(result, bookId)), () => renderProgress(result));
+    printResult(globalOptions(), outputData(result, projectProgress(result, bookId)), () => renderProgress(result));
   }));
 
 book
   .command("inspect")
-  .description("inspect availability, progress, shelf, and note coverage for a book")
+  .description("join book metadata, chapter access facts, progress, shelf, and notes")
   .argument("<book-or-id>", "bookId or book name")
   .action(run(async (bookOrId: string) => {
     const bookId = await bookIdFromInput(bookOrId);
@@ -368,7 +342,7 @@ book
 
 book
   .command("inspect-batch")
-  .description("inspect up to 20 book IDs while sharing shelf and notebook fetches")
+  .description("join facts for up to 20 book IDs while sharing shelf and notebook fetches")
   .requiredOption("--book-id <id>", "bookId to inspect; repeatable, maximum 20", collect, [])
   .action(run(async (options: { bookId: string[] }) => {
     const bookIds = uniqueBookIds(options.bookId, 20);
@@ -397,14 +371,10 @@ shelf
     const limit = options.all ? Number.POSITIVE_INFINITY : options.limit;
     const limited = limitShelfRaw(result, limit);
     const projected = projectShelfEntries(result, limit);
-    const warnings = projected.hasMore
-      ? [`Shelf list limited to ${projected.returned} of ${projected.total} entries; use --all for complete coverage.`]
-      : [];
     printResult(
       globalOptions(),
-      agentData(limited, projected),
+      outputData(limited, projected),
       () => renderShelfList(limited, limit),
-      { complete: !projected.hasMore, warnings },
     );
   }));
 
@@ -415,19 +385,9 @@ stats
   .option("--mode <mode>", "weekly|monthly|annually|overall", "monthly")
   .option("--base-time <timestamp>", "Unix timestamp inside target period", parseNonNegativeInt)
   .option("--date <date>", "date inside target period in Asia/Shanghai: YYYY, YYYY-MM, or YYYY-MM-DD")
-  .option("--view <view>", "raw|summary", "raw")
-  .addHelpText("after", `
-Agent semantics:
-  durations are seconds; dayAverageReadTime is a natural-calendar-day average
-  compare is the ratio change in that average (0.2 means up 20%)
-  weekly/monthly buckets are days, annually buckets are months, overall buckets are years
-  --agent always returns the compact period contract; --view controls non-agent JSON only`)
-  .action(run(async (options: { mode: string; baseTime?: number; date?: string; view: string }) => {
+  .action(run(async (options: { mode: string; baseTime?: number; date?: string }) => {
     if (!["weekly", "monthly", "annually", "overall"].includes(options.mode)) {
       throw new CliError("ARG_INVALID", "Mode must be weekly, monthly, annually, or overall.");
-    }
-    if (!["raw", "summary"].includes(options.view)) {
-      throw new CliError("ARG_INVALID", "View must be raw or summary.");
     }
     if (options.baseTime !== undefined && options.date !== undefined) {
       throw new CliError("ARG_INVALID", "Use either --base-time or --date, not both.");
@@ -437,9 +397,7 @@ Agent semantics:
     if (options.date !== undefined) params.baseTime = parseStatsDate(options.date);
     const result = await client().call("/readdata/detail", params);
     const period = summarizeTrendPeriod(result, options.mode);
-    const output = globalOptions().agent
-      ? { fieldGuide: STATS_FIELD_GUIDE, period }
-      : options.view === "summary" ? summarizeStats(result, options.mode) : result;
+    const output = stableOutputEnabled() ? { period } : result;
     printResult(
       globalOptions(),
       output,
@@ -451,11 +409,6 @@ Agent semantics:
 stats
   .command("trend")
   .description("show compact weekly, monthly, annual, and overall reading trends")
-  .addHelpText("after", `
-Agent semantics:
-  durations are seconds; dayAverageReadTime is a natural-calendar-day average
-  compare is the ratio change in that average (0.2 means up 20%)
-  inspect fieldGuide, dataQuality, meta.complete, and warnings before analysis`)
   .action(run(async () => {
     const modes = ["weekly", "monthly", "annually", "overall"] as const;
     const periods: StatsTrendPeriod[] = [];
@@ -466,7 +419,6 @@ Agent semantics:
     const output = {
       timeZone: "Asia/Shanghai",
       historyRange: statsHistoryRange(periods, currentShanghaiYear()),
-      fieldGuide: STATS_FIELD_GUIDE,
       periods,
     };
     printResult(
@@ -479,43 +431,65 @@ Agent semantics:
 
 stats
   .command("history")
-  .description("show a bounded range of compact annual reading periods")
-  .requiredOption("--from <year>", "first calendar year", parseYear)
-  .requiredOption("--to <year>", "last calendar year", parseYear)
-  .addHelpText("after", `
-Agent semantics:
-  returns one schema-backed response instead of requiring one CLI process per year
-  the range is inclusive and limited to 20 years
-  derive an unknown first year from stats trend's overall annual buckets; do not probe arbitrary early years
-  use stats trend separately for the current weekly/monthly/overall snapshot`)
-  .action(run(async (options: { from: number; to: number }) => {
-    if (options.from > options.to) {
+  .description("show annual reading periods; defaults to the full supported range")
+  .option("--from <year>", `first calendar year; defaults to ${STATS_HISTORY_MIN_YEAR}`, parseYear)
+  .option("--to <year>", "last calendar year; defaults to current year", parseYear)
+  .action(run(async (options: { from?: number; to?: number }) => {
+    const asOfDate = currentShanghaiDate();
+    const currentYear = Number(asOfDate.slice(0, 4));
+    if ((options.from !== undefined && options.from > currentYear)
+      || (options.to !== undefined && options.to > currentYear)) {
+      throw new CliError("ARG_INVALID", `History bounds may not be later than the current Asia/Shanghai year ${currentYear}.`);
+    }
+    if (options.from !== undefined && options.to !== undefined && options.from > options.to) {
       throw new CliError("ARG_INVALID", "--from must be less than or equal to --to.");
     }
-    if (options.to - options.from + 1 > 20) {
-      throw new CliError("ARG_INVALID", "Stats history accepts at most 20 calendar years.");
+    const overall = summarizeTrendPeriod(
+      await client().call("/readdata/detail", { mode: "overall" }),
+      "overall",
+    );
+    const historyRange = statsHistoryRange([overall], currentYear);
+    const fromYear = options.from ?? STATS_HISTORY_MIN_YEAR;
+    const toYear = options.to ?? currentYear;
+    if (fromYear > toYear) {
+      throw new CliError("ARG_INVALID", "--from must be less than or equal to --to.");
+    }
+    if (fromYear < STATS_HISTORY_MIN_YEAR || toYear < STATS_HISTORY_MIN_YEAR) {
+      throw new CliError("ARG_INVALID", `Stats history begins at supported year ${STATS_HISTORY_MIN_YEAR}.`);
+    }
+    if (toYear > currentYear) {
+      throw new CliError("ARG_INVALID", `--to may not be later than the current Asia/Shanghai year ${currentYear}.`);
     }
     const periods: Array<StatsTrendPeriod & { year: number }> = [];
-    for (let year = options.from; year <= options.to; year += 1) {
+    for (let year = fromYear; year <= toYear; year += 1) {
       const result = await client().call("/readdata/detail", {
         mode: "annually",
         baseTime: parseStatsDate(`${year}-12-31`),
       });
       periods.push({ year, ...summarizeTrendPeriod(result, "annually") });
     }
-    const annotatedPeriods = annotateHistoryPeriods(periods);
+    const annotatedPeriods = annotateHistoryPeriods(periods, asOfDate);
     const output = {
       timeZone: "Asia/Shanghai",
-      fromYear: options.from,
-      toYear: options.to,
-      fieldGuide: STATS_FIELD_GUIDE,
+      asOfDate,
+      historyRange,
+      fromYear,
+      toYear,
       periods: annotatedPeriods,
     };
     printResult(
       globalOptions(),
       output,
       () => renderTrend(periods),
-      { warnings: statsWarnings(annotatedPeriods) },
+      {
+        warnings: [
+          ...(historyRange.firstNonzeroYear !== null
+            && historyRange.firstNonzeroYear < STATS_HISTORY_MIN_YEAR
+            ? [`Overall statistics report activity before the earliest supported annual-detail year ${STATS_HISTORY_MIN_YEAR}; the automatic range begins at ${STATS_HISTORY_MIN_YEAR}.`]
+            : []),
+          ...statsWarnings(annotatedPeriods),
+        ],
+      },
     );
   }));
 
@@ -525,38 +499,17 @@ notes
   .description("list books with notes")
   .option("--limit <n>", "maximum books when --all is absent", parsePositiveInt, 20)
   .option("--all", "fetch every page; ignores --limit")
-  .action(run(async (options: { limit: number; all?: boolean }) => {
-    const result = await fetchNotebooks(client(), options.limit, Boolean(options.all));
-    const projected = projectNotebooks(result);
-    const complete = asRecord(result).hasMore !== 1;
-    const warnings = complete
-      ? []
-      : [`Notebook list limited to ${projected.returned} of ${projected.totalBookCount} books; use --all for complete coverage.`];
+  .option("--last-sort <n>", "pagination cursor from the previous response", parseNonNegativeInt)
+  .action(run(async (options: { limit: number; all?: boolean; lastSort?: number }) => {
+    const result = await fetchNotebooks(client(), options.limit, Boolean(options.all), options.lastSort);
+    if (options.all && asRecord(result).hasMore === 1) {
+      throw new CliError("INCOMPLETE_RESULT", "Notebook pagination ended before all requested pages were fetched.");
+    }
+    const projected = projectNotebooks(result, options.all ? Number.POSITIVE_INFINITY : options.limit);
     printResult(
       globalOptions(),
-      agentData(result, projected),
+      outputData(result, projected),
       () => renderNotebooks(result),
-      { complete, warnings },
-    );
-  }));
-
-notes
-  .command("sample")
-  .description("return one deterministic thought-book sample and its coverage")
-  .action(run(async () => {
-    const result = await fetchNotebooks(client(), 100, true);
-    const index = projectNotebooks(result);
-    const sample = sampleThoughtNotebooks(index);
-    const complete = asRecord(result).hasMore !== 1;
-    printResult(
-      globalOptions(),
-      sample,
-      () => [
-        `Selected ${sample.coverage.selectedBooks} of ${sample.index.booksWithThoughts} books with thoughts.`,
-        `Thought coverage: ${sample.coverage.selectedThoughtCount}/${sample.index.totalThoughtCount} (${(sample.coverage.thoughtCoverageRatio * 100).toFixed(1)}%).`,
-        `Book IDs: ${sample.bookIds.join(",")}`,
-      ].join("\n"),
-      { complete },
     );
   }));
 
@@ -572,43 +525,110 @@ notes
     }
     const bookId = await bookIdFromInput(bookOrId);
     const exported = await exportNotes(bookId);
+    const projected = projectNotes(exported);
     const content = options.format === "json" ? `${JSON.stringify(exported, null, 2)}\n` : renderNotesMarkdown(exported);
     if (options.output) {
       await writeFile(options.output, content, "utf8");
     }
     const result = options.output
       ? { bookId, output: options.output, format: options.format, bytes: Buffer.byteLength(content) }
-      : agentData(exported, projectNotes(exported));
+      : outputData(exported, projected);
     printResult(
       globalOptions(),
       result,
       () => options.output ? `Wrote ${options.output}` : content.trimEnd(),
-      { complete: asRecord(asRecord(exported).reviews).complete !== false },
+      { warnings: projected.reviewsExhausted ? [] : [`Personal review pagination for ${bookId} was not exhausted.`] },
     );
   }));
 
 notes
   .command("corpus")
   .description("return a compact corpus of personal highlights and thoughts")
-  .requiredOption("--book-id <id>", "bookId to include; repeatable, maximum 50", collect, [])
+  .option("--book-id <id>", "bookId to include; repeatable, maximum 50", collect, [])
+  .option("--all-notebooks", "page through books from the live notebook index")
   .option("--view <view>", "full|thoughts; thoughts omits standalone source-book highlights", "full")
+  .option("--limit <n>", "maximum notebook books in this corpus page (1-50)", parseCorpusLimit, 10)
+  .option("--cursor <token>", "opaque corpus cursor from the previous response")
   .addHelpText("after", `
 Content scope:
   exports highlights plus personal note/review entries, but not bookmark positions
   thoughts[].content contains the reader's own words
-  thoughts[].quotedText/contextText contains source-book context, not the reader's words
-  for large libraries, select a representative set or run batches with backoff`)
-  .action(run(async (options: { bookId: string[]; view: string }) => {
+  thoughts[].quotedText/contextText contains source-book context, not the reader's words`)
+  .action(run(async (options: {
+    bookId: string[];
+    allNotebooks?: boolean;
+    view: string;
+    limit: number;
+    cursor?: string;
+  }) => {
     if (!["full", "thoughts"].includes(options.view)) {
       throw new CliError("ARG_INVALID", "View must be full or thoughts.");
     }
-    const ids = uniqueBookIds(options.bookId);
+    if (options.allNotebooks && options.bookId.length) {
+      throw new CliError("ARG_INVALID", "Use either --all-notebooks or explicit --book-id values, not both.");
+    }
+    if (!options.allNotebooks && options.cursor !== undefined) {
+      throw new CliError("ARG_INVALID", "--cursor is only valid with --all-notebooks.");
+    }
+    const explicitIds = options.allNotebooks ? [] : uniqueBookIds(options.bookId);
+    let notebookIndex: ReturnType<typeof projectNotebooks>;
+    let indexExhausted = true;
+    let indexChanged = false;
+    let page = { hasMore: false, nextArgs: null, nextArgv: null } as {
+      hasMore: boolean;
+      nextArgs: { "--cursor": string } | null;
+      nextArgv: string[] | null;
+    };
+    if (options.allNotebooks) {
+      const cursor = options.cursor ? decodeCorpusCursor(options.cursor) : undefined;
+      const corpusIndexPage = await fetchCorpusNotebookPage(client(), options.limit, cursor);
+      notebookIndex = projectNotebooks(corpusIndexPage.result);
+      indexExhausted = corpusIndexPage.indexExhausted;
+      indexChanged = corpusIndexPage.indexChanged;
+      if (corpusIndexPage.nextCursorState) {
+        const nextCursor = encodeCorpusCursor(corpusIndexPage.nextCursorState);
+        page = {
+          hasMore: true,
+          nextArgs: { "--cursor": nextCursor },
+          nextArgv: [
+            "--json",
+            "notes",
+            "corpus",
+            "--all-notebooks",
+            "--view",
+            options.view,
+            "--limit",
+            String(options.limit),
+            "--cursor",
+            nextCursor,
+          ],
+        };
+      }
+    } else {
+      const notebookResult = await fetchNotebooks(client(), 100, true);
+      if (asRecord(notebookResult).hasMore === 1) {
+        throw new CliError("INCOMPLETE_RESULT", "Notebook pagination ended before corpus selection completed.");
+      }
+      notebookIndex = projectNotebooks(notebookResult);
+    }
+    const notebookById = new Map(notebookIndex.books.map((entry) => [entry.book.bookId, entry]));
+    const ids = options.allNotebooks
+      ? notebookIndex.books.map((entry) => entry.book.bookId).filter(Boolean)
+      : explicitIds;
     const fullBooks: ReturnType<typeof projectNotes>[] = [];
-    let complete = true;
     for (const bookId of ids) {
       const projected = projectNotes(await exportNotes(bookId), false);
-      fullBooks.push(projected);
-      complete = complete && projected.complete;
+      const notebook = notebookById.get(bookId);
+      fullBooks.push({
+        ...projected,
+        book: notebook ? {
+          ...notebook.book,
+          ...projected.book,
+          bookId: projected.book.bookId || notebook.book.bookId,
+          title: projected.book.title || notebook.book.title,
+          author: projected.book.author || notebook.book.author,
+        } : projected.book,
+      });
     }
     const books = options.view === "thoughts"
       ? fullBooks.map(({ highlights: _highlights, ...book }) => book)
@@ -618,6 +638,18 @@ Content scope:
     const returnedHighlights = options.view === "thoughts" ? 0 : sourceHighlights;
     const output = {
       view: options.view,
+      selection: {
+        mode: options.allNotebooks ? "all-notebooks" : "explicit-book-ids",
+        requestedBooks: ids.length,
+        notebookIndex: {
+          returned: options.allNotebooks
+            ? notebookIndex.returned
+            : ids.filter((bookId) => notebookById.has(bookId)).length,
+          totalBookCount: notebookIndex.totalBookCount,
+          indexExhausted,
+        },
+      },
+      page,
       contentScope: {
         includes: options.view === "thoughts"
           ? ["personal note/review entries"]
@@ -627,7 +659,6 @@ Content scope:
           : ["bookmark positions"],
         personalWordsField: "books[].thoughts[].content",
         sourceContextFields: ["books[].thoughts[].quotedText", "books[].thoughts[].contextText"],
-        maxBookIdsPerCall: 50,
       },
       books,
       totals: {
@@ -643,7 +674,18 @@ Content scope:
         emptyThoughts: fullBooks.reduce((sum, item) => sum + item.counts.emptyThoughts, 0),
       },
     };
-    printResult(globalOptions(), output, () => renderNotesCorpus(fullBooks), { complete });
+    const unexhaustedReviews = fullBooks.filter((book) => !book.reviewsExhausted).length;
+    const warnings: string[] = [];
+    if (unexhaustedReviews) {
+      warnings.push(`Personal review pagination was not exhausted for ${unexhaustedReviews} returned book(s).`);
+    }
+    if (indexChanged) warnings.push("The notebook index count changed during corpus traversal.");
+    printResult(
+      globalOptions(),
+      output,
+      () => renderNotesCorpus(fullBooks, options.view),
+      { warnings },
+    );
   }));
 
 notes
@@ -658,7 +700,7 @@ notes
     if (options.chapterUid !== undefined) params.chapterUid = options.chapterUid;
     const result = await client().call("/book/bestbookmarks", params);
     const raw = limitArrayField(result, "items", options.limit);
-    printResult(globalOptions(), agentData(raw, projectPopularHighlights(result, options.limit)), () => renderPopularHighlights(raw));
+    printResult(globalOptions(), outputData(raw, projectPopularHighlights(result, options.limit)), () => renderPopularHighlights(raw));
   }));
 
 const reviews = program.command("reviews").description("public book reviews");
@@ -668,10 +710,9 @@ reviews
   .argument("<book-or-id>", "bookId or book name")
   .option("--type <type>", "all|recommend|bad|latest|normal", "all")
   .option("--limit <n>", "review count", parsePositiveInt, 20)
-  .option("--max-content-chars <n>", "maximum review text per compact item", parsePositiveInt, 800)
   .option("--max-idx <n>", "pagination offset from the previous response", parseNonNegativeInt, 0)
   .option("--synckey <n>", "pagination cursor from the previous response", parseNonNegativeInt, 0)
-  .action(run(async (bookOrId: string, options: { type: string; limit: number; maxContentChars: number; maxIdx: number; synckey: number }) => {
+  .action(run(async (bookOrId: string, options: { type: string; limit: number; maxIdx: number; synckey: number }) => {
     const bookId = await bookIdFromInput(bookOrId);
     const reviewListType = reviewTypeNumber(options.type);
     const result = await client().call("/review/list", {
@@ -684,7 +725,7 @@ reviews
     const raw = limitArrayField(result, "reviews", options.limit);
     printResult(
       globalOptions(),
-      agentData(raw, projectReviews(result, bookId, options.type, options.limit, options.maxContentChars)),
+      outputData(raw, projectReviews(result, bookId, options.type, options.limit)),
       () => renderReviews(raw),
     );
   }));
@@ -692,14 +733,24 @@ reviews
 reviews
   .command("batch")
   .description("fetch bounded public reviews for multiple books and review types")
-  .requiredOption("--book-id <id>", "bookId to include; repeatable", collect, [])
+  .requiredOption("--book-id <id>", "bookId to include; repeatable, maximum 50", collect, [])
   .option("--type <type>", "all|recommend|bad|latest|normal; repeatable or comma-separated", collect, [])
   .option("--limit <n>", "maximum reviews per book and type", parsePositiveInt, 5)
-  .option("--max-content-chars <n>", "maximum review text per compact item", parsePositiveInt, 800)
-  .action(run(async (options: { bookId: string[]; type: string[]; limit: number; maxContentChars: number }) => {
-    const bookIds = uniqueBookIds(options.bookId);
+  .option("--max-idx <n>", "pagination offset from the previous response", parseNonNegativeInt, 0)
+  .option("--synckey <n>", "pagination cursor from the previous response", parseNonNegativeInt, 0)
+  .action(run(async (options: {
+    bookId: string[];
+    type: string[];
+    limit: number;
+    maxIdx: number;
+    synckey: number;
+  }) => {
+    const bookIds = uniqueBookIds(options.bookId, 50);
     const requestedTypes = options.type.length ? options.type : ["all"];
     const types = [...new Set(requestedTypes.flatMap((value) => value.split(",")).map((value) => value.trim()).filter(Boolean))];
+    if (!types.length) {
+      throw new CliError("ARG_INVALID", "Provide at least one review type, or omit --type to use all.");
+    }
     const batches: ReturnType<typeof projectReviews>[] = [];
     for (const bookId of bookIds) {
       for (const type of types) {
@@ -707,10 +758,10 @@ reviews
           bookId,
           reviewListType: reviewTypeNumber(type),
           count: options.limit,
-          maxIdx: 0,
-          synckey: 0,
+          maxIdx: options.maxIdx,
+          synckey: options.synckey,
         });
-        batches.push(projectReviews(result, bookId, type, options.limit, options.maxContentChars));
+        batches.push(projectReviews(result, bookId, type, options.limit, "batch"));
       }
     }
     printResult(globalOptions(), { batches }, () => renderReviewBatches(batches));
@@ -721,11 +772,10 @@ discover
   .command("recommend")
   .description("show personalized recommendations")
   .option("--limit <n>", "recommendation count", parsePositiveInt, 12)
-  .option("--max-idx <n>", "pagination offset from the previous response", parseNonNegativeInt, 0)
-  .action(run(async (options: { limit: number; maxIdx: number }) => {
-    const result = await client().call("/book/recommend", { count: options.limit, maxIdx: options.maxIdx });
+  .action(run(async (options: { limit: number }) => {
+    const result = await client().call("/book/recommend", { count: options.limit });
     const raw = limitArrayField(result, "books", options.limit);
-    printResult(globalOptions(), agentData(raw, projectRecommendations(result, options.limit)), () => renderRecommend(raw));
+    printResult(globalOptions(), outputData(raw, projectRecommendations(result, options.limit)), () => renderRecommend(raw));
   }));
 
 discover
@@ -744,16 +794,19 @@ discover
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
     });
     const raw = limitSimilarRaw(result, options.limit);
-    printResult(globalOptions(), agentData(raw, projectSimilar(result, options.limit)), () => renderSimilar(raw));
+    printResult(globalOptions(), outputData(raw, projectSimilar(result, bookId, options.limit)), () => renderSimilar(raw));
   }));
 
 const api = program.command("api").description("raw gateway escape hatch");
 api
   .command("call")
-  .description("call a raw gateway API with configured auth")
+  .description("call an untyped gateway API; requires --raw")
   .argument("<api-name>", "gateway API name such as /store/search")
   .option("--param <key=value>", "flat business parameter; repeatable", collect, [])
   .action(run(async (apiName: string, options: { param: string[] }) => {
+    if (!globalOptions().raw) {
+      throw new CliError("ARG_INVALID", "Raw API calls require --raw. Use `weread --raw api call ...`.");
+    }
     const params: JsonObject = {};
     for (const raw of options.param) {
       const [key, value] = parseParam(raw);
@@ -763,21 +816,80 @@ api
     printResult(globalOptions(), result, () => JSON.stringify(result, null, 2));
   }));
 
-await program.parseAsync(process.argv);
+try {
+  await program.parseAsync(process.argv);
+} catch (error) {
+  activeOperationId ??= operationIdFromArgv();
+  if (error instanceof CommanderError) {
+    if (error.exitCode === 0) {
+      // Commander uses exceptions for successful --help and --version exits when exitOverride is enabled.
+    } else if (machineOutputRequested()) {
+      printError(machineOptionsFromArgv(), new CliError("ARG_INVALID", commanderMessage(error.message)));
+      process.exitCode = 2;
+    } else {
+      process.exitCode = 2;
+    }
+  } else {
+    printError(machineOptionsFromArgv(), error);
+    process.exitCode = exitCodeForError(error);
+  }
+}
 
 function run<T extends unknown[]>(fn: (...args: T) => Promise<void>) {
   return async (...args: T): Promise<void> => {
     try {
+      validateOutputMode();
       await fn(...args);
     } catch (error) {
       printError(globalOptions(), error);
-      process.exitCode = 1;
+      process.exitCode = exitCodeForError(error);
     }
   };
 }
 
 function globalOptions(): GlobalOptions {
   return program.opts<GlobalOptions>();
+}
+
+function effectiveGatewaySkillVersion(): string {
+  return applicationClient?.skillVersion ?? resolveGatewaySkillVersion(globalOptions().skillVersion);
+}
+
+function stableOutputEnabled(): boolean {
+  const options = globalOptions();
+  return Boolean(options.json || options.agent);
+}
+
+function validateOutputMode(): void {
+  const options = globalOptions();
+  if (options.raw && (options.json || options.agent)) {
+    throw new CliError("ARG_INVALID", "Do not combine --raw with --json or --agent.");
+  }
+}
+
+function machineOptionsFromArgv(): GlobalOptions {
+  const args = process.argv.slice(2);
+  return {
+    json: args.includes("--json"),
+    agent: args.includes("--agent"),
+    raw: args.includes("--raw"),
+  };
+}
+
+function machineOutputRequested(): boolean {
+  const options = machineOptionsFromArgv();
+  return Boolean(options.json || options.agent || options.raw);
+}
+
+function commanderMessage(message: string): string {
+  const normalized = message.replace(/^error:\s*/i, "").trim();
+  return normalized === "(outputHelp)"
+    ? "No operation was provided. Run `weread operations` to list stable commands."
+    : normalized;
+}
+
+function exitCodeForError(error: unknown): 1 | 2 {
+  return error instanceof CliError && error.code === "ARG_INVALID" ? 2 : 1;
 }
 
 function operationIdFor(command: Command): string {
@@ -787,7 +899,28 @@ function operationIdFor(command: Command): string {
     names.unshift(current.name());
     current = current.parent;
   }
-  return names.join(".");
+  const id = names.join(".");
+  return id === "operations" ? "operations.list" : id;
+}
+
+function operationIdFromArgv(): string | undefined {
+  const args = process.argv.slice(2);
+  const commandArgs: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index]!;
+    if (value === "--json" || value === "--agent" || value === "--raw") continue;
+    if (value === "--skill-version") {
+      index += 1;
+      continue;
+    }
+    if (value.startsWith("--skill-version=")) continue;
+    commandArgs.push(value);
+  }
+  return [...STABLE_OPERATIONS]
+    .filter((entry) => entry.argv.length > 0)
+    .sort((left, right) => right.argv.length - left.argv.length)
+    .find((entry) => entry.argv.every((value, index) => commandArgs[index] === value))
+    ?.id ?? INVOCATION_ERROR_OPERATION_ID;
 }
 
 function client(): WereadClient {
@@ -797,8 +930,8 @@ function client(): WereadClient {
   return applicationClient;
 }
 
-function agentData<T, U>(raw: T, compact: U): T | U {
-  return globalOptions().agent ? compact : raw;
+function outputData<T, U>(raw: T, stable: U): T | U {
+  return stableOutputEnabled() ? stable : raw;
 }
 
 function collect(value: string, previous: string[]): string[] {
@@ -824,8 +957,8 @@ function parseNonNegativeInt(value: string): number {
 
 function parseYear(value: string): number {
   const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1900 || parsed > 2100) {
-    throw new CliError("ARG_INVALID", `Expected a calendar year from 1900 to 2100, got ${value}`);
+  if (!Number.isInteger(parsed) || parsed < STATS_HISTORY_MIN_YEAR) {
+    throw new CliError("ARG_INVALID", `Expected a calendar year from ${STATS_HISTORY_MIN_YEAR} onward, got ${value}`);
   }
   return parsed;
 }
@@ -834,6 +967,14 @@ function parsePopularLimit(value: string): number {
   const parsed = parsePositiveInt(value);
   if (parsed > 20) {
     throw new CliError("ARG_INVALID", "Popular highlight limit cannot exceed the gateway maximum of 20.");
+  }
+  return parsed;
+}
+
+function parseCorpusLimit(value: string): number {
+  const parsed = parsePositiveInt(value);
+  if (parsed > 50) {
+    throw new CliError("ARG_INVALID", "Notes corpus page limit cannot exceed 50 books.");
   }
   return parsed;
 }
@@ -859,7 +1000,15 @@ function num(value: unknown): number {
 }
 
 function uniqueBookIds(values: string[], maximum = 50): string[] {
-  const ids = [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+  const normalized = values.map((value) => value.trim()).filter(Boolean);
+  const invalidIndex = normalized.findIndex((value) => /\s/.test(value));
+  if (invalidIndex !== -1) {
+    throw new CliError(
+      "ARG_INVALID",
+      `--book-id item ${invalidIndex + 1} must be one ID without whitespace. Pass repeated --book-id flags for multiple IDs.`,
+    );
+  }
+  const ids = [...new Set(normalized)];
   if (!ids.length) throw new CliError("ARG_INVALID", "Provide at least one --book-id.");
   if (ids.length > maximum) {
     throw new CliError("ARG_INVALID", `At most ${maximum} book IDs may be requested at once.`);
@@ -883,10 +1032,18 @@ function parseStatsDate(value: string): number {
 }
 
 function currentShanghaiYear(): number {
-  return Number(new Intl.DateTimeFormat("en-US", {
+  return Number(currentShanghaiDate().slice(0, 4));
+}
+
+function currentShanghaiDate(): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "Asia/Shanghai",
     year: "numeric",
-  }).format(new Date()));
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${value.year}-${value.month}-${value.day}`;
 }
 
 function limitArrayField(result: unknown, field: string, limit: number): UnknownRecord {
@@ -929,6 +1086,9 @@ async function inspectBooks(bookIds: string[]): Promise<ReturnType<typeof inspec
     client().call("/shelf/sync"),
     fetchNotebooks(client(), 100, true),
   ]);
+  if (asRecord(notebookResult).hasMore === 1) {
+    throw new CliError("PAGINATION_INCOMPLETE", "Notebook pagination ended before all requested pages were fetched.");
+  }
   const results: ReturnType<typeof inspectBook>[] = [];
   for (const bookId of bookIds) {
     const [info, chapters, progress] = await Promise.all([
@@ -953,10 +1113,9 @@ interface ResolvedBook {
   bookId: string;
   title: string;
   author: string;
-  match: "exact-title" | "first-search-result";
+  match: "exact-title";
   rating?: number;
   deepLink?: string;
-  candidates: unknown[];
 }
 
 async function resolveBook(query: string): Promise<ResolvedBook> {
@@ -965,7 +1124,10 @@ async function resolveBook(query: string): Promise<ResolvedBook> {
   const result = await client().call("/store/search", { keyword: query, scope: 10, count: 10 });
   const candidates = searchBooks(result);
   const exact = candidates.find((candidate) => text(asRecord(asRecord(candidate).bookInfo).title) === query);
-  const selected = asRecord(exact ?? candidates[0]);
+  if (!exact) {
+    throw new CliError("NOT_FOUND", `No exact book-title match for ${query}; use search to inspect candidates.`);
+  }
+  const selected = asRecord(exact);
   const bookInfo = asRecord(selected.bookInfo);
   const bookId = text(bookInfo.bookId);
   const rating = number(selected.newRating) ?? number(bookInfo.newRating);
@@ -977,10 +1139,9 @@ async function resolveBook(query: string): Promise<ResolvedBook> {
     bookId,
     title: text(bookInfo.title),
     author: text(bookInfo.author),
-    match: exact ? "exact-title" : "first-search-result",
+    match: "exact-title",
     ...(rating !== undefined ? { rating } : {}),
     ...(text(bookInfo.deepLink) ? { deepLink: text(bookInfo.deepLink) } : {}),
-    candidates,
   };
 }
 
@@ -1133,7 +1294,7 @@ function renderStats(result: unknown, mode: string): string {
     `自然日均: ${formatDuration(summary.dayAverageReadTime)}`,
   ];
   if (typeof summary.compare === "number") {
-    lines.push(`与上期相比: ${(summary.compare * 100).toFixed(1)}%`);
+    lines.push(`上游 compare: ${summary.compare}`);
   }
   if (summary.topBooks.length) {
     lines.push("", "读得最多:");
@@ -1157,18 +1318,26 @@ function renderStats(result: unknown, mode: string): string {
 }
 
 function renderTrend(periods: StatsTrendPeriod[]): string {
-  return periods.map((period) => [
-    `${period.mode}: ${formatDuration(period.totalReadTime)} · ${period.readDays ?? 0}天`,
-    `  ${period.bucketGranularity} buckets: ${period.buckets.length}`,
-    period.topBooks[0]?.title ? `  top: ${period.topBooks[0].title}` : undefined,
-  ].filter(Boolean).join("\n")).join("\n");
+  return periods.map((period) => {
+    const facts = period as StatsTrendPeriod & {
+      year?: number;
+      periodComplete?: boolean;
+      throughDate?: string;
+    };
+    const label = facts.year === undefined ? period.mode : String(facts.year);
+    return [
+      `${label}: ${formatDuration(period.totalReadTime)} · ${period.readDays ?? 0}天`,
+      facts.periodComplete === false ? `  through: ${facts.throughDate}` : undefined,
+      `  ${period.bucketGranularity} buckets: ${period.buckets.length}`,
+      period.topBooks[0]?.title ? `  top: ${period.topBooks[0].title}` : undefined,
+    ].filter(Boolean).join("\n");
+  }).join("\n");
 }
 
 function renderBookInspection(value: unknown): string {
   const result = asRecord(value);
   const book = asRecord(result.book);
-  const availability = asRecord(result.availability);
-  const chapters = asRecord(result.chapters);
+  const accessFacts = asRecord(result.accessFacts);
   const progress = asRecord(result.progress);
   const shelf = asRecord(result.shelf);
   const notebook = asRecord(result.notebook);
@@ -1176,8 +1345,8 @@ function renderBookInspection(value: unknown): string {
   const readingText = progress.readingSeconds === null ? "未记录" : formatDuration(progress.readingSeconds);
   return [
     `${text(book.title) || text(book.bookId)} - ${text(book.author) || "-"}`,
-    `可读: ${availability.readable ? "是" : "否"}${availability.reason ? ` (${availability.reason})` : ""}`,
-    `章节: ${chapters.count ?? 0} · 免费 ${chapters.freeCount ?? 0} · 已购 ${chapters.purchasedCount ?? 0}`,
+    `下架: ${accessFacts.soldOut === null ? "未报告" : accessFacts.soldOut ? "是" : "否"}`,
+    `章节: ${accessFacts.returnedChapterCount ?? 0} · 价格为 0 ${accessFacts.zeroPriceChapterCount ?? 0} · 价格大于 0 ${accessFacts.pricedChapterCount ?? 0} · 已购 ${accessFacts.purchasedChapterCount ?? 0} · 价格未知 ${accessFacts.unknownPriceChapterCount ?? 0}`,
     `进度: ${progressText} · 累计 ${readingText}`,
     `书架: ${shelf.present ? "有" : "无"} · 笔记本: ${notebook.present ? "有" : "无"}`,
     book.deepLink ? `打开: ${text(book.deepLink)}` : undefined,
@@ -1246,13 +1415,20 @@ function renderNotesMarkdown(exported: UnknownRecord): string {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
-function renderNotesCorpus(books: ReturnType<typeof projectNotes>[]): string {
+function renderNotesCorpus(books: ReturnType<typeof projectNotes>[], view: string): string {
   if (!books.length) return "No notes.";
   return books.map((book) => {
     const title = book.book.title || book.bookId;
-    const lines = [`# ${title}`, `划线 ${book.counts.highlights} · 想法 ${book.counts.thoughts}`];
-    for (const highlight of book.highlights) {
-      lines.push(`- [划线] ${highlight.chapterTitle ? `${highlight.chapterTitle}: ` : ""}${highlight.text}`);
+    const lines = [
+      `# ${title}`,
+      view === "thoughts"
+        ? `想法 ${book.counts.thoughts}`
+        : `划线 ${book.counts.highlights} · 想法 ${book.counts.thoughts}`,
+    ];
+    if (view !== "thoughts") {
+      for (const highlight of book.highlights) {
+        lines.push(`- [划线] ${highlight.chapterTitle ? `${highlight.chapterTitle}: ` : ""}${highlight.text}`);
+      }
     }
     for (const thought of book.thoughts) {
       const body = thought.content

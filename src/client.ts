@@ -4,6 +4,12 @@ import { CliError } from "./errors.js";
 export const GATEWAY_URL = "https://i.weread.qq.com/api/agent/gateway";
 export const SKILL_VERSION = "1.0.5";
 
+export function resolveGatewaySkillVersion(override?: string): string {
+  return override?.trim()
+    || process.env.WEREAD_SKILL_VERSION?.trim()
+    || SKILL_VERSION;
+}
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
@@ -32,7 +38,7 @@ export class WereadClient {
     this.apiKey = options.apiKey;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.timeoutMs = options.timeoutMs ?? 30_000;
-    this.currentSkillVersion = options.skillVersion ?? (process.env.WEREAD_SKILL_VERSION?.trim() || SKILL_VERSION);
+    this.currentSkillVersion = resolveGatewaySkillVersion(options.skillVersion);
     this.maxAttempts = options.maxAttempts ?? 3;
     this.retryBaseMs = options.retryBaseMs ?? 250;
     this.sleepImpl = options.sleepImpl ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));

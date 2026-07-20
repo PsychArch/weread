@@ -1,101 +1,119 @@
 ---
 name: weread-cli
-description: Inspect and analyze a user's WeRead reading statistics, shelf, progress, notes, highlights, comments, public reviews, and recommendations through the local `weread` CLI. Use when a request asks for evidence-grounded reading insights, knowledge-gap analysis, book recommendations, note/comment synthesis, reading trends, or WeRead book availability checks.
+description: Retrieve a user's WeRead reading statistics, shelf, progress, notes, highlights, comments, public reviews, discovery results, and book metadata through the local `weread` CLI. Use when Codex needs read-only WeRead data or a stable JSON contract for programmatic CLI access.
 ---
 
 # WeRead CLI
 
-Use the executable selected below as the read-only data layer. Interpret the
-evidence yourself; do not treat a large export as the answer.
+Use the CLI as a read-only data interface.
 
-## Start
+## Select the executable
 
-1. Choose one executable for the whole run. Inside the `@psycharch/weread`
-   source checkout, use `node dist/cli.js` wherever this skill shows `weread`;
-   the checkout is authoritative over a PATH-installed package. If `dist/cli.js`
-   is absent, run `pnpm run build` once first. Outside the source checkout, use
-   the installed `weread` command.
-2. Check readiness once:
+Examples below use `weread`. In the `@psycharch/weread` source checkout, use
+`node dist/cli.js` instead; run `pnpm run build` after source changes before
+using it. Outside the checkout, use the PATH-installed `weread`.
 
-   ```bash
-   weread --agent doctor
-   ```
+## Use stable operations
 
-   Require `ok=true`, `data.ready=true`, `meta.complete=true`, the expected
-   `meta.operationId` and `meta.schemaId`, and an array-valued `warnings`. If
-   the command is missing or schema metadata is absent, update the installed
-   package or, in this repository, run `pnpm run build` and use
-   `node dist/cli.js`.
-3. Read the one task reference that matches the request:
-
-   - Reading patterns or history: read [references/stats.md](references/stats.md).
-   - Personal notes or viewpoint insight: read [references/notes.md](references/notes.md).
-   - Recommendations or availability: read [references/recommendations.md](references/recommendations.md).
-4. In addition to the task reference, read
-   [references/contract.md](references/contract.md) before the first JSON
-   Schema lookup, new `jq` projection, or unfamiliar operation. Task routing
-   and contract loading are not alternatives. Read the task reference and
-   contract in separate tool calls; do not concatenate their output.
-5. Keep all operations read-only. Do not store credentials or invoke a live
-   mutation unless the user explicitly requests it.
-
-## Use the machine contract only when needed
-
-Common operation IDs are named in the task references. For a known operation,
-read its compact data schema directly before writing a new `jq` projection:
+Invoke a known operation directly:
 
 ```bash
-weread schema get notes.notebooks --data
+weread --json <command> [arguments]
 ```
 
-Do not fetch the full capabilities catalog first. If invocation details are
-unknown, fetch only that operation:
+Discovery is only needed when the operation ID is unknown:
 
 ```bash
-weread capabilities --operation notes.notebooks --json
+weread operations
+weread --json operations
 ```
 
-Use the full `weread capabilities --json` catalog only to discover an unknown
-operation ID. Read at most one data schema for each operation actually used;
-never load schemas speculatively or reread one to answer a local projection
-question.
+Before guessing unfamiliar flags, response paths, pagination, or limitations,
+fetch that operation's descriptor once:
 
-## Bound tool and context use
+```bash
+operation_id=notes.notebooks
+descriptor_file=$(mktemp)
+weread --json operation describe "$operation_id" >"$descriptor_file"
 
-- Capture each live response once. Reuse it for every local filter, count, and
-  excerpt selection; do not refetch a shelf, notebook index, corpus, or history
-  merely to change `jq`.
-- Redirect responses likely to exceed 8 KB to one task-specific `mktemp -d`
-  directory. Bring only bounded projections into model context. Do not print a
-  whole shelf, schema collection, or corpus.
-- Keep each local projection below 8,000 UTF-8 bytes and at most eight full
-  note/review excerpts unless the user asks for exhaustive output. Character
-  count is not a byte-size check for Chinese text.
-- Prefer one batched data command over repeated per-item commands. Deduplicate
-  IDs before the request.
-- Make guards fail closed: use `jq -e`, and start every multi-command capture
-  block with `set -euo pipefail`. `set -o pipefail` alone does not stop a later
-  successful projection from masking a failed guard. A guard may instead run
-  as its own status-bearing tool call.
-- Treat live responses as authoritative. Prior recommendations or old counts
-  may suggest questions, but must not anchor the current candidate list or be
-  reported as current evidence.
+jq '{
+  id: .data.id,
+  jsonArgv: .data.invocation.jsonArgv,
+  input: .data.input,
+  pagination: .data.pagination,
+  limitations: .data.limitations,
+  schemaId: .data.output.schemaId,
+  dataRequired: .data.output.responseSchema["$defs"].data.required,
+  dataProperties: (.data.output.responseSchema["$defs"].data.properties | keys)
+}' "$descriptor_file"
+```
 
-## Preserve evidence boundaries
+The exact success-and-error schema is at `data.output.responseSchema`.
+`data.output.dataSchemaRef` is the JSON Schema reference to the success
+`data` payload. Use bracket notation for `"$defs"` in `jq`, as shown
+above. The descriptor is self-contained; use its singular `input` field and
+schema instead of probing a live response with `keys` or fallback field names.
 
-- Check `ok`, `meta.complete`, `warnings`, and command-level `dataQuality`.
-  Completeness describes requested fetch coverage; it does not erase caveats.
-- Only `thoughts[].content` is the reader's own wording. Highlights,
-  `quotedText`, and `contextText` are source-book text.
-- Public reviews are other readers' views, never the user's notes.
-- `availability.readable` means at least one chapter is confirmed readable.
-  Report `accessLevel`; do not promote partial access to full-book access.
-- Scope absence claims to what was actually indexed or sampled.
+Cache the descriptor per operation ID for the selected executable. Refresh it
+after rebuilding or changing the executable, or when a response's
+`meta.schemaId` differs.
 
-## Stop when the answer is supported
+For pagination, `data.page.nextArgv` is the complete argument array to pass
+after the executable. Execute that array unchanged. `nextArgs` contains only
+the continuation values. Paginated batch results expose the same pair on each
+batch item's page. Treat opaque cursors as pass-through values; do not decode
+or reconstruct them.
 
-Stop collecting evidence as soon as the requested conclusion has the minimum
-necessary signals, coverage is quantified, quality warnings are handled, and
-remaining uncertainty can be stated honestly. After the last necessary live
-response, use at most two bounded local projections, then answer. Do not widen
-the analysis merely because more operations exist.
+Live operations check their own credentials and gateway preconditions. Use
+`weread --json doctor` only when a separate readiness diagnostic is useful;
+operation discovery and description are fully offline.
+
+Capture an expensive live response once, then apply every local `jq`
+projection to that saved stdout. Keep stderr separate and preserve the CLI
+status:
+
+```bash
+stdout_file=$(mktemp)
+stderr_file=$(mktemp)
+if weread --json notes notebooks --limit 20 >"$stdout_file" 2>"$stderr_file"; then
+  jq -e '
+    .ok == true and
+    .meta.operationId == "notes.notebooks" and
+    (.meta.schemaId | type == "string") and
+    (.warnings | type == "array")
+  ' "$stdout_file" >/dev/null
+  jq '.data.books' "$stdout_file"
+else
+  exit_code=$?
+  jq -e '.ok == false and (.error.code | type == "string")' "$stderr_file" >&2 ||
+    printf 'weread process failure\n' >&2
+  exit "$exit_code"
+fi
+```
+
+A zero exit writes the `ok=true` response to stdout. A nonzero exit writes the
+schema-backed `ok=false` response to stderr. Unmatched argv uses
+`invocation.error`; argument errors for a known leaf use that leaf's response
+contract. Treat non-JSON stderr as a process failure.
+
+On success, inspect `meta.complete`, `warnings`, and operation-specific
+quality, coverage, or continuation fields. `meta.complete` means that the
+invocation completed; collection and period coverage have separate fields in
+the descriptor schema. Full JSON Schema validation is optional when the task
+needs it.
+
+## Stable and raw boundaries
+
+- Default output is concise text for humans.
+- `--json` is the stable, schema-backed machine interface.
+- `--raw` exposes legacy or upstream-shaped JSON with no stable schema. Use it
+  only when no stable operation exposes the required read-only data, and do
+  not infer a durable response contract from it.
+- Access the generic gateway only through the explicit raw escape hatch:
+
+  ```bash
+  weread --raw api call <api-name> [--param key=value]
+  ```
+
+This skill covers read-only access. Do not use the raw gateway to synthesize a
+mutation.

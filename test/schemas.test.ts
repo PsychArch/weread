@@ -1,178 +1,258 @@
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
-import { inspectBook, projectNotebooks, sampleThoughtNotebooks } from "../src/domain.js";
-import { agentSuccess } from "../src/output.js";
-import { STATS_FIELD_GUIDE, annotateHistoryPeriods, summarizeTrendPeriod } from "../src/stats.js";
+import { inspectBook, projectNotebooks } from "../src/domain.js";
+import { jsonSuccess } from "../src/output.js";
+import { annotateHistoryPeriods, summarizeTrendPeriod } from "../src/stats.js";
 import {
-  CAPABILITIES_SCHEMA,
-  CAPABILITIES_SCHEMA_ID,
-  CAPABILITIES_MANIFEST_VERSION,
-  JSON_SCHEMA_DIALECT,
+  INVOCATION_ERROR_OPERATION_ID,
   STABLE_OPERATIONS,
-  agentSchemaId,
   dataSchemaFor,
-  operationManifest,
+  describeOperation,
+  operationsCatalog,
+  responseSchemaId,
   schemaFor,
 } from "../src/schemas.js";
 
+const EXPECTED_OPERATION_IDS = [
+  "operations.list",
+  "operation.describe",
+  "invocation.error",
+  "doctor",
+  "config.path",
+  "config.show",
+  "config.set-key",
+  "config.clear",
+  "search",
+  "stats.detail",
+  "stats.trend",
+  "stats.history",
+  "book.resolve",
+  "book.resolve-batch",
+  "book.info",
+  "book.chapters",
+  "book.progress",
+  "book.inspect",
+  "book.inspect-batch",
+  "shelf.summary",
+  "shelf.list",
+  "notes.notebooks",
+  "notes.export",
+  "notes.corpus",
+  "notes.popular",
+  "reviews.list",
+  "reviews.batch",
+  "discover.recommend",
+  "discover.similar",
+] as const;
+
 function validator() {
-  const ajv = new Ajv2020({ allErrors: true, strict: true, validateFormats: false });
-  return ajv;
+  return new Ajv2020({ allErrors: true, strict: true, validateFormats: false });
 }
 
 describe("bundled JSON Schemas", () => {
-  it("compiles every advertised response schema", () => {
-    const ajv = validator();
-    expect(() => ajv.compile(CAPABILITIES_SCHEMA)).not.toThrow();
+  it("registers every structured response contract and no task-specific sample workflow", () => {
+    expect(STABLE_OPERATIONS.map((operation) => operation.id)).toEqual(EXPECTED_OPERATION_IDS);
+    expect(STABLE_OPERATIONS.some((operation) => operation.id === "notes.sample")).toBe(false);
+  });
+
+  it("compiles every advertised response and data schema", () => {
     for (const operation of STABLE_OPERATIONS) {
-      const schema = schemaFor(operation.id);
-      expect(schema, operation.id).toBeDefined();
-      expect(() => ajv.compile(schema!), operation.id).not.toThrow();
-      expect(() => validator().compile(dataSchemaFor(operation.id)!), `${operation.id} data`).not.toThrow();
+      const responseSchema = schemaFor(operation.id);
+      const dataSchema = dataSchemaFor(operation.id);
+      expect(responseSchema, operation.id).toBeDefined();
+      expect(dataSchema, operation.id).toBeDefined();
+      expect(() => validator().compile(responseSchema!), `${operation.id} response`).not.toThrow();
+      expect(() => validator().compile(dataSchema!), `${operation.id} data`).not.toThrow();
     }
   });
 
-  it("validates the capabilities manifest and resolves every schema command", () => {
-    const manifest = {
-      schemaId: CAPABILITIES_SCHEMA_ID,
-      schemaCommand: ["schema", "get", "capabilities"],
-      manifestVersion: CAPABILITIES_MANIFEST_VERSION,
-      schemaDialect: JSON_SCHEMA_DIALECT,
+  it("makes discovery small and each operation descriptor self-contained", () => {
+    const catalog = operationsCatalog();
+    expect(catalog).toMatchObject({
+      contractVersion: "1",
       executable: "weread",
-      cliVersion: "0.1.0",
-      gatewaySkillVersion: "1.0.5",
-      authentication: ["WEREAD_API_KEY", "config"],
-      outputModes: ["human", "raw-json", "agent"],
-      operations: operationManifest(),
-      rawGateway: { argv: ["--json", "api", "call"], stability: "upstream-shaped", schema: null },
-      completeness: { metaComplete: "fetch completeness", warnings: "inspect warnings" },
-      safety: { gatewayOperations: "read-only" },
-    };
-    const validate = validator().compile(CAPABILITIES_SCHEMA);
+      rawEscape: {
+        argv: ["--raw", "api", "call"],
+        stability: "upstream-shaped",
+        responseSchema: null,
+      },
+    });
+    expect(catalog.operations.map((operation) => operation.id)).toEqual(EXPECTED_OPERATION_IDS);
 
-    expect(validate(manifest), JSON.stringify(validate.errors)).toBe(true);
-    for (const operation of manifest.operations) {
-      expect(operation.command.argv[0], operation.id).toBe("--agent");
-      expect(operation.command.helpArgv.at(-1), operation.id).toBe("--help");
-      expect(operation.input).toMatchObject({ positionals: expect.any(Array), options: expect.any(Array), constraints: expect.any(Array) });
-      expect(schemaFor(operation.id)?.$id).toBe(operation.output.schemaId);
-      expect(dataSchemaFor(operation.id)?.$id).toBe(operation.output.dataSchemaId);
-    }
-
-    const selected = { ...manifest, operations: operationManifest("stats.history") };
-    expect(validate(selected), JSON.stringify(validate.errors)).toBe(true);
-    expect(selected.operations).toHaveLength(1);
-    expect(selected.operations[0]?.input.options).toEqual(expect.arrayContaining([
-      expect.objectContaining({ flag: "--from", required: true, minimum: 1900 }),
-      expect.objectContaining({ flag: "--to", required: true, maximum: 2100 }),
-    ]));
-  });
-
-  it("keeps stable projections closed and history guarantees explicit", () => {
-    for (const name of ["capabilities", ...STABLE_OPERATIONS.map((operation) => operation.id)]) {
-      const schema = schemaFor(name)!;
-      expect(findValues(schema, "additionalProperties")).not.toContain(true);
-    }
-
-    const history = {
-      timeZone: "Asia/Shanghai",
-      fromYear: 2024,
-      toYear: 2024,
-      fieldGuide: STATS_FIELD_GUIDE,
-      periods: annotateHistoryPeriods([{ year: 2024, ...summarizeTrendPeriod({}, "annually") }]),
-    };
-    const validate = validator().compile(dataSchemaFor("stats.history")!);
-    expect(validate(history), JSON.stringify(validate.errors)).toBe(true);
-
-    const missingYear = structuredClone(history) as unknown as { periods: Array<Record<string, unknown>> };
-    delete missingYear.periods[0]!.year;
-    expect(validate(missingYear)).toBe(false);
-
-    const missingAnalysis = structuredClone(history) as unknown as { periods: Array<Record<string, unknown>> };
-    delete missingAnalysis.periods[0]!.historyAnalysis;
-    expect(validate(missingAnalysis)).toBe(false);
-
-    const wrongMode = structuredClone(history);
-    wrongMode.periods[0]!.mode = "monthly";
-    expect(validate(wrongMode)).toBe(false);
-
-    expect(dataSchemaFor("stats.trend")?.$defs).toMatchObject({
-      statsCategorySummary: {
-        properties: {
-          count: { description: expect.stringContaining("separately from readTime") },
-          readTime: { description: expect.stringContaining("separately from count") },
+    const describeDataSchema = validator().compile(dataSchemaFor("operation.describe")!);
+    for (const operation of STABLE_OPERATIONS) {
+      const descriptor = describeOperation(operation.id)!;
+      expect(descriptor).toMatchObject({
+        id: operation.id,
+        invocation: {
+          executable: "weread",
+          argv: operation.argv,
+          jsonArgv: ["--json", ...operation.argv],
         },
+        output: {
+          schemaId: responseSchemaId(operation.id),
+          responseSchema: {
+            $id: responseSchemaId(operation.id),
+            $defs: { data: operation.dataSchema },
+          },
+          dataSchemaRef: "#/$defs/data",
+        },
+      });
+      expect(descriptor.output).not.toHaveProperty("dataSchema");
+      expect(describeDataSchema(descriptor), JSON.stringify(describeDataSchema.errors)).toBe(true);
+    }
+    expect(describeOperation("missing.operation")).toBeUndefined();
+  });
+
+  it("publishes an error-only contract for unmatched stable invocations", () => {
+    const descriptor = describeOperation(INVOCATION_ERROR_OPERATION_ID)!;
+    expect(descriptor).toMatchObject({
+      id: INVOCATION_ERROR_OPERATION_ID,
+      invocation: {
+        argv: [],
+        jsonArgv: ["--json"],
+        helpArgv: ["--help"],
       },
-      fieldGuide: {
-        required: expect.arrayContaining(["categories"]),
+      output: {
+        schemaId: responseSchemaId(INVOCATION_ERROR_OPERATION_ID),
       },
+    });
+
+    const validate = validator().compile(schemaFor(INVOCATION_ERROR_OPERATION_ID)!);
+    const error = {
+      ok: false,
+      error: { code: "ARG_INVALID", message: "unknown command" },
+      meta: {
+        schemaVersion: "3",
+        gatewaySkillVersion: "1.0.5",
+        complete: false,
+        timeZone: "Asia/Shanghai",
+        operationId: INVOCATION_ERROR_OPERATION_ID,
+        schemaId: responseSchemaId(INVOCATION_ERROR_OPERATION_ID),
+      },
+      warnings: [],
+    };
+    expect(validate(error), JSON.stringify(validate.errors)).toBe(true);
+    expect(validate(jsonSuccess({}, {
+      operationId: INVOCATION_ERROR_OPERATION_ID,
+      schemaId: responseSchemaId(INVOCATION_ERROR_OPERATION_ID),
+    }))).toBe(false);
+  });
+
+  it("keeps every advertised continuation argument executable", () => {
+    const expectedOptions: Record<string, string[]> = {
+      search: ["--max-idx", "--session-id"],
+      "shelf.list": ["--all"],
+      "notes.notebooks": ["--last-sort"],
+      "notes.corpus": ["--cursor"],
+      "reviews.list": ["--max-idx", "--synckey"],
+      "reviews.batch": ["--max-idx", "--synckey"],
+      "discover.similar": ["--max-idx", "--session-id"],
+    };
+
+    for (const [operationId, flags] of Object.entries(expectedOptions)) {
+      const descriptor = describeOperation(operationId)!;
+      expect(descriptor.pagination.nextArgsField).not.toBeNull();
+      expect(descriptor.pagination.nextArgvField).not.toBeNull();
+      const accepted = descriptor.input.options.map((option) => option.flag);
+      for (const flag of flags) expect(accepted, `${operationId} ${flag}`).toContain(flag);
+    }
+    expect(describeOperation("discover.recommend")?.pagination).toMatchObject({
+      mode: "none",
+      pageField: null,
+      nextArgsField: null,
+      nextArgvField: null,
     });
   });
 
-  it("validates representative notebook and inspection agent documents", () => {
-    const notebooks = projectNotebooks({
+  it("requires a usable continuation exactly when hasMore is true", () => {
+    const validate = validator().compile(dataSchemaFor("search")!);
+    const base = { queryResultCount: 1, books: [{ bookId: "1", title: "One", author: "" }] };
+
+    const searchNextArgv = [
+      "--json", "search", "term", "--scope", "book", "--limit", "1",
+      "--max-idx", "7", "--session-id", "sid", "--skill-version", "1.0.5",
+    ];
+    expect(validate({
+      ...base,
+      page: {
+        hasMore: true,
+        nextArgs: { "--max-idx": 7, "--session-id": "sid" },
+        nextArgv: searchNextArgv,
+      },
+    })).toBe(true);
+    expect(validate({
+      ...base,
+      page: {
+        hasMore: true,
+        nextArgs: { "--max-idx": 7, "--session-id": "sid" },
+        nextArgv: searchNextArgv.slice(0, -2),
+      },
+    })).toBe(false);
+    expect(validate({ ...base, page: { hasMore: true, nextArgs: null, nextArgv: null } })).toBe(false);
+    expect(validate({ ...base, page: { hasMore: true, nextArgs: {}, nextArgv: searchNextArgv } })).toBe(false);
+    expect(validate({ ...base, page: { hasMore: true, nextArgs: { "--max-idx": 7 }, nextArgv: searchNextArgv } })).toBe(false);
+    expect(validate({ ...base, page: { hasMore: true, nextArgs: { "--all": true }, nextArgv: searchNextArgv } })).toBe(false);
+    expect(validate({ ...base, page: { hasMore: false, nextArgs: null, nextArgv: null } })).toBe(true);
+    expect(validate({
+      ...base,
+      page: { hasMore: false, nextArgs: { "--max-idx": 7, "--session-id": "sid" }, nextArgv: searchNextArgv },
+    })).toBe(false);
+
+    const validateShelf = validator().compile(dataSchemaFor("shelf.list")!);
+    const shelf = { returned: 0, total: 1, archives: [], entries: [] };
+    expect(validateShelf({
+      ...shelf,
+      page: {
+        hasMore: true,
+        nextArgs: { "--all": true },
+        nextArgv: ["--json", "shelf", "list", "--all", "--skill-version", "1.0.5"],
+      },
+    })).toBe(true);
+    expect(validateShelf({
+      ...shelf,
+      page: {
+        hasMore: true,
+        nextArgs: { "--all": false },
+        nextArgv: ["--json", "shelf", "list", "--all", "--skill-version", "1.0.5"],
+      },
+    })).toBe(false);
+
+    const validateNotebooks = validator().compile(dataSchemaFor("notes.notebooks")!);
+    const notebooks = {
+      returned: 0,
       totalBookCount: 1,
-      totalNoteCount: 3,
-      hasMore: 0,
-      books: [{
-        noteCount: 1,
-        reviewCount: 2,
-        book: { bookId: "1", title: "Book", author: "Author" },
-      }],
-    });
-    const notebookDocument = agentSuccess(notebooks, {
-      operationId: "notes.notebooks",
-      schemaId: agentSchemaId("notes.notebooks"),
-    });
-    const validateNotebooks = validator().compile(schemaFor("notes.notebooks")!);
-    expect(validateNotebooks(notebookDocument), JSON.stringify(validateNotebooks.errors)).toBe(true);
+      totalNoteCount: 0,
+      syncKey: null,
+      noBookReviewCount: null,
+      books: [],
+    };
+    const notebookNextArgv = [
+      "--json", "notes", "notebooks", "--limit", "20", "--last-sort", "10",
+      "--skill-version", "1.0.5",
+    ];
+    expect(validateNotebooks({
+      ...notebooks,
+      page: { hasMore: true, nextArgs: { "--last-sort": 10 }, nextArgv: notebookNextArgv },
+    })).toBe(true);
+    expect(validateNotebooks({
+      ...notebooks,
+      page: { hasMore: true, nextArgs: { "--max-idx": 10 }, nextArgv: notebookNextArgv },
+    })).toBe(false);
 
-    const sampleDocument = agentSuccess(sampleThoughtNotebooks(notebooks), {
-      operationId: "notes.sample",
-      schemaId: agentSchemaId("notes.sample"),
-    });
-    const validateSample = validator().compile(schemaFor("notes.sample")!);
-    expect(validateSample(sampleDocument), JSON.stringify(validateSample.errors)).toBe(true);
-
-    const validateResolved = validator().compile(dataSchemaFor("book.resolve")!);
-    expect(validateResolved({
-      query: "Book",
-      match: "exact-title",
-      bookId: "1",
-      title: "Book",
-      author: "Author",
-    }), JSON.stringify(validateResolved.errors)).toBe(true);
-
-    const inspection = inspectBook({
-      bookId: "1",
-      info: { bookId: "1", title: "Book", author: "Author", soldout: 0 },
-      chapters: { chapters: [{ price: 0 }, { price: 10 }] },
-      progress: { bookId: "1" },
-      shelf: { books: [] },
-      notebooks: { books: [] },
-    });
-    const inspectionDocument = agentSuccess(inspection, {
-      operationId: "book.inspect",
-      schemaId: agentSchemaId("book.inspect"),
-    });
-    const validateInspection = validator().compile(schemaFor("book.inspect")!);
-    expect(validateInspection(inspectionDocument), JSON.stringify(validateInspection.errors)).toBe(true);
-    expect(inspection.progress).toMatchObject({ percent: null, readingSeconds: null });
-
-    const unexpected = structuredClone(inspectionDocument) as { data: { book: Record<string, unknown> } };
-    unexpected.data.book.uncontracted = true;
-    expect(validateInspection(unexpected)).toBe(false);
-  });
-
-  it("makes the notes corpus evidence paths and view scope machine-checkable", () => {
+    const validateCorpus = validator().compile(dataSchemaFor("notes.corpus")!);
     const corpus = {
       view: "thoughts",
+      selection: {
+        mode: "all-notebooks",
+        requestedBooks: 0,
+        notebookIndex: { returned: 2, totalBookCount: 2, indexExhausted: false },
+      },
       contentScope: {
         includes: ["personal note/review entries"],
         excludes: ["bookmark positions", "standalone source-book highlights"],
         personalWordsField: "books[].thoughts[].content",
         sourceContextFields: ["books[].thoughts[].quotedText", "books[].thoughts[].contextText"],
-        maxBookIdsPerCall: 50,
       },
       books: [],
       totals: {
@@ -188,17 +268,301 @@ describe("bundled JSON Schemas", () => {
         emptyThoughts: 0,
       },
     };
+    const corpusCursor = "wrc1.eyJsYXN0U29ydCI6MTAsImxhc3RCb29rSWQiOiIxIiwiZW1pdHRlZCI6MSwidG90YWxCb29rQ291bnQiOjJ9";
+    const corpusNextArgv = [
+      "--json", "notes", "corpus", "--all-notebooks", "--view", "thoughts",
+      "--limit", "1", "--cursor", corpusCursor, "--skill-version", "1.0.5",
+    ];
+    expect(validateCorpus({
+      ...corpus,
+      page: { hasMore: true, nextArgs: { "--cursor": corpusCursor }, nextArgv: corpusNextArgv },
+    }), JSON.stringify(validateCorpus.errors)).toBe(true);
+    expect(validateCorpus({
+      ...corpus,
+      selection: {
+        ...corpus.selection,
+        notebookIndex: { ...corpus.selection.notebookIndex, indexExhausted: true },
+      },
+      page: { hasMore: true, nextArgs: { "--cursor": corpusCursor }, nextArgv: corpusNextArgv },
+    })).toBe(false);
+    expect(validateCorpus({
+      ...corpus,
+      page: { hasMore: true, nextArgs: { "--cursor": corpusCursor }, nextArgv: notebookNextArgv },
+    })).toBe(false);
+
+    const validateReviews = validator().compile(dataSchemaFor("reviews.list")!);
+    const reviews = { bookId: "1", type: "latest", returned: 0, reviews: [] };
+    const reviewNextArgv = [
+      "--json", "reviews", "list", "1", "--type", "latest", "--limit", "20",
+      "--max-idx", "2", "--synckey", "3", "--skill-version", "1.0.5",
+    ];
+    expect(validateReviews({
+      ...reviews,
+      page: { hasMore: true, nextArgs: { "--max-idx": 2, "--synckey": 3 }, nextArgv: reviewNextArgv },
+    })).toBe(true);
+    expect(validateReviews({
+      ...reviews,
+      page: { hasMore: true, nextArgs: { "--max-idx": 2 }, nextArgv: reviewNextArgv },
+    })).toBe(false);
+  });
+
+  it("discriminates notes corpus views and selection continuations", () => {
     const validate = validator().compile(dataSchemaFor("notes.corpus")!);
+    const contentFields = {
+      personalWordsField: "books[].thoughts[].content",
+      sourceContextFields: ["books[].thoughts[].quotedText", "books[].thoughts[].contextText"],
+    };
+    const book = {
+      book: { bookId: "1", title: "One", author: "Author" },
+      bookId: "1",
+      counts: {
+        highlights: 1,
+        thoughts: 0,
+        thoughtsWithText: 0,
+        contextOnlyThoughts: 0,
+        ratingOnlyThoughts: 0,
+        emptyThoughts: 0,
+        total: 1,
+      },
+      reviewsExhausted: true,
+      thoughts: [],
+    };
+    const terminalPage = { hasMore: false, nextArgs: null, nextArgv: null };
+    const selection = {
+      mode: "explicit-book-ids",
+      requestedBooks: 1,
+      notebookIndex: { returned: 1, totalBookCount: 1, indexExhausted: true },
+    };
+    const totals = {
+      books: 1,
+      sourceHighlights: 1,
+      sourceThoughts: 0,
+      returnedHighlights: 0,
+      returnedThoughts: 0,
+      returnedItems: 0,
+      thoughtsWithText: 0,
+      contextOnlyThoughts: 0,
+      ratingOnlyThoughts: 0,
+      emptyThoughts: 0,
+    };
+    const thoughtsCorpus = {
+      view: "thoughts",
+      selection,
+      page: terminalPage,
+      contentScope: {
+        includes: ["personal note/review entries"],
+        excludes: ["bookmark positions", "standalone source-book highlights"],
+        ...contentFields,
+      },
+      books: [book],
+      totals,
+    };
+    const fullCorpus = {
+      ...thoughtsCorpus,
+      view: "full",
+      contentScope: {
+        includes: ["highlights", "personal note/review entries"],
+        excludes: ["bookmark positions"],
+        ...contentFields,
+      },
+      books: [{
+        ...book,
+        highlights: [{
+          chapterUid: "1",
+          chapterTitle: "Chapter",
+          text: "Source highlight",
+          createdAt: null,
+          createdDate: null,
+        }],
+      }],
+      totals: { ...totals, returnedHighlights: 1, returnedItems: 1 },
+    };
 
-    expect(validate(corpus), JSON.stringify(validate.errors)).toBe(true);
+    expect(validate(fullCorpus), JSON.stringify(validate.errors)).toBe(true);
+    expect(validate({ ...fullCorpus, books: [book] })).toBe(false);
+    expect(validate({
+      ...fullCorpus,
+      contentScope: { ...fullCorpus.contentScope, includes: ["personal note/review entries"] },
+    })).toBe(false);
+    expect(validate({
+      ...fullCorpus,
+      contentScope: {
+        ...fullCorpus.contentScope,
+        excludes: ["bookmark positions", "standalone source-book highlights"],
+      },
+    })).toBe(false);
 
-    const guessedPath = structuredClone(corpus);
-    guessedPath.contentScope.personalWordsField = "thoughts[].content";
-    expect(validate(guessedPath)).toBe(false);
+    expect(validate(thoughtsCorpus), JSON.stringify(validate.errors)).toBe(true);
+    expect(validate({ ...thoughtsCorpus, books: [{ ...book, highlights: [] }] })).toBe(false);
+    expect(validate({
+      ...thoughtsCorpus,
+      contentScope: {
+        ...thoughtsCorpus.contentScope,
+        includes: ["highlights", "personal note/review entries"],
+      },
+    })).toBe(false);
+    expect(validate({
+      ...thoughtsCorpus,
+      contentScope: { ...thoughtsCorpus.contentScope, excludes: ["bookmark positions"] },
+    })).toBe(false);
 
-    const mismatchedView = structuredClone(corpus);
-    mismatchedView.contentScope.includes = ["highlights", "personal note/review entries"];
-    expect(validate(mismatchedView)).toBe(false);
+    const corpusCursor = "wrc1.eyJsYXN0U29ydCI6MTAsImxhc3RCb29rSWQiOiIxIiwiZW1pdHRlZCI6MSwidG90YWxCb29rQ291bnQiOjJ9";
+    const continuationPage = {
+      hasMore: true,
+      nextArgs: { "--cursor": corpusCursor },
+      nextArgv: [
+        "--json", "notes", "corpus", "--all-notebooks", "--view", "thoughts",
+        "--limit", "1", "--cursor", corpusCursor, "--skill-version", "1.0.5",
+      ],
+    };
+    const continuedAllNotebooks = {
+      ...thoughtsCorpus,
+      selection: {
+        ...selection,
+        mode: "all-notebooks",
+        notebookIndex: { ...selection.notebookIndex, indexExhausted: false },
+      },
+      page: continuationPage,
+    };
+    expect(validate(continuedAllNotebooks), JSON.stringify(validate.errors)).toBe(true);
+    expect(validate({
+      ...continuedAllNotebooks,
+      selection: { ...continuedAllNotebooks.selection, mode: "explicit-book-ids" },
+    })).toBe(false);
+    expect(validate({
+      ...continuedAllNotebooks,
+      selection: {
+        ...continuedAllNotebooks.selection,
+        notebookIndex: { ...continuedAllNotebooks.selection.notebookIndex, indexExhausted: true },
+      },
+    })).toBe(false);
+
+    const terminalAllNotebooks = {
+      ...thoughtsCorpus,
+      selection: { ...selection, mode: "all-notebooks" },
+    };
+    expect(validate(terminalAllNotebooks), JSON.stringify(validate.errors)).toBe(true);
+    expect(validate({
+      ...terminalAllNotebooks,
+      selection: {
+        ...terminalAllNotebooks.selection,
+        notebookIndex: { ...terminalAllNotebooks.selection.notebookIndex, indexExhausted: false },
+      },
+    })).toBe(false);
+  });
+
+  it("separates successful command completion from collection breadth", () => {
+    const document = jsonSuccess({
+      queryResultCount: 1,
+      page: {
+        hasMore: true,
+        nextArgs: { "--max-idx": 7, "--session-id": "sid" },
+        nextArgv: [
+          "--json", "search", "term", "--scope", "book", "--limit", "1",
+          "--max-idx", "7", "--session-id", "sid",
+        ],
+      },
+      books: [{ bookId: "1", title: "One", author: "" }],
+    }, {
+      operationId: "search",
+      schemaId: responseSchemaId("search"),
+    });
+    const validate = validator().compile(schemaFor("search")!);
+
+    expect(validate(document), JSON.stringify(validate.errors)).toBe(true);
+    const incomplete = structuredClone(document);
+    incomplete.meta.complete = false;
+    expect(validate(incomplete)).toBe(false);
+  });
+
+  it("validates representative neutral stats, notebook, and inspection documents", () => {
+    const history = {
+      timeZone: "Asia/Shanghai",
+      asOfDate: "2026-07-20",
+      historyRange: {
+        earliestSupportedYear: 2017,
+        firstNonzeroYear: 2024,
+        lastCompleteYear: 2025,
+        currentYear: 2026,
+        source: "stats.trend.overall.buckets",
+      },
+      fromYear: 2024,
+      toYear: 2024,
+      periods: annotateHistoryPeriods([{ year: 2024, ...summarizeTrendPeriod({}, "annually") }], "2026-07-20"),
+    };
+    const validateHistory = validator().compile(dataSchemaFor("stats.history")!);
+    expect(validateHistory(history), JSON.stringify(validateHistory.errors)).toBe(true);
+    expect(history.periods[0]).not.toHaveProperty("derivedMetrics");
+    expect(history.periods[0]).not.toHaveProperty("historyAnalysis");
+
+    const currentHistoryData = {
+      ...history,
+      fromYear: 2026,
+      toYear: 2026,
+      periods: annotateHistoryPeriods([
+        { year: 2026, ...summarizeTrendPeriod({}, "annually") },
+      ], "2026-07-20"),
+    };
+    const currentHistory = jsonSuccess(currentHistoryData, {
+      operationId: "stats.history",
+      schemaId: responseSchemaId("stats.history"),
+    });
+    const validateHistoryEnvelope = validator().compile(schemaFor("stats.history")!);
+    expect(validateHistoryEnvelope(currentHistory), JSON.stringify(validateHistoryEnvelope.errors)).toBe(true);
+    expect(currentHistory.meta.complete).toBe(true);
+    expect(currentHistoryData.periods[0]?.periodComplete).toBe(false);
+
+    const notebooks = projectNotebooks({
+      totalBookCount: 1,
+      totalNoteCount: 3,
+      hasMore: 0,
+      books: [{
+        sort: 10,
+        markedStatus: 2,
+        noteCount: 1,
+        reviewCount: 2,
+        book: { bookId: "1", title: "Book", author: "Author" },
+      }],
+    });
+    const validateNotebooks = validator().compile(dataSchemaFor("notes.notebooks")!);
+    expect(validateNotebooks(notebooks), JSON.stringify(validateNotebooks.errors)).toBe(true);
+    expect(notebooks.books[0]).toMatchObject({ readingProgress: null, markedStatus: 2, sort: 10 });
+
+    const inspection = inspectBook({
+      bookId: "1",
+      info: { bookId: "1", title: "Book", author: "Author", soldout: 0 },
+      chapters: { chapters: [{ price: 0 }, { price: 10 }] },
+      progress: { bookId: "1" },
+      shelf: { books: [] },
+      notebooks: { books: [] },
+    });
+    const validateInspection = validator().compile(dataSchemaFor("book.inspect")!);
+    expect(validateInspection(inspection), JSON.stringify(validateInspection.errors)).toBe(true);
+    expect(inspection.progress).toMatchObject({
+      percent: null,
+      readingSeconds: null,
+      recordReadingSeconds: null,
+      listeningSeconds: null,
+    });
+  });
+
+  it("keeps stable projections closed while allowing embedded JSON Schemas", () => {
+    for (const operation of STABLE_OPERATIONS) {
+      const schema = schemaFor(operation.id)!;
+      expect(findValues(schema, "additionalProperties"), operation.id).not.toContain(true);
+    }
+
+    const inspectionSchema = validator().compile(dataSchemaFor("book.inspect")!);
+    const inspection = inspectBook({
+      bookId: "1",
+      info: { bookId: "1", title: "Book", author: "Author" },
+      chapters: { chapters: [] },
+      progress: { bookId: "1" },
+      shelf: { books: [] },
+      notebooks: { books: [] },
+    }) as unknown as { book: Record<string, unknown> };
+    inspection.book.uncontracted = true;
+    expect(inspectionSchema(inspection)).toBe(false);
   });
 });
 

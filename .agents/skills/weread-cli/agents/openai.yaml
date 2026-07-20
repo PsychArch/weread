@@ -1,4 +1,4 @@
 interface:
-  display_name: "WeRead CLI"
-  short_description: "Analyze WeRead history, notes, and book access"
-  default_prompt: "Use $weread-cli to analyze my reading history and notes or recommend access-verified books."
+  display_name: "WeRead Data CLI"
+  short_description: "Retrieve schema-backed WeRead data"
+  default_prompt: "Use $weread-cli to retrieve the WeRead data needed for my request."
