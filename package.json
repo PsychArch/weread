@@ -1,6 +1,6 @@
 {
   "name": "@psycharch/weread",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Unofficial human- and agent-friendly CLI for the WeRead Agent Gateway.",
   "type": "module",
   "license": "MIT",

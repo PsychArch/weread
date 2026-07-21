@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented here.
 
-## Unreleased
+## 0.1.1 - 2026-07-21
 
 - Make `--json` the stable, schema-backed machine interface and keep `--agent`
   as a compatibility alias. Existing unwrapped JSON consumers should use
