@@ -6,9 +6,8 @@ An unofficial, read-only CLI that makes WeRead data easier to explore from a
 terminal or with an AI agent.
 
 `weread` can search the catalog, inspect a shelf, follow reading progress, read
-statistics, and collect notes or public reviews. Its agent mode goes a step
-further: instead of forwarding an entire gateway response, it returns a smaller
-versioned projection built for analysis.
+statistics, and collect notes or public reviews. It provides concise text for
+people and a stable, schema-backed JSON interface for programs and agents.
 
 This project is not affiliated with or endorsed by Tencent or WeRead.
 
@@ -84,7 +83,8 @@ Once `doctor` reports that the gateway is ready, try a few commands:
 ```bash
 weread search "基因传" --scope book --limit 5
 weread shelf summary
-weread stats detail --mode annually --date 2025 --view summary
+weread stats detail --mode annually --date 2025
+weread stats history
 weread notes export 922224 --format markdown --output notes.md
 weread discover recommend --limit 12
 ```
@@ -93,113 +93,111 @@ The default output is intended for a person at a terminal. Dates, durations,
 ratings, and progress are formatted for reading rather than preserved merely
 because the server happened to return them that way.
 
-## Agent mode
+## Machine-readable interface
 
-Place `--agent` before a command to receive compact normalized JSON:
+The CLI has three output boundaries:
+
+- no output flag: concise text for a person at a terminal;
+- `--json`: stable normalized data in a schema-backed envelope;
+- `--raw`: unwrapped legacy or upstream-shaped data with no stability guarantee.
+
+`--agent` remains a silent compatibility alias for `--json`. New integrations
+should use `--json`.
+
+The machine interface is discoverable without credentials or a live gateway
+request:
 
 ```bash
-weread --agent stats trend
-weread --agent book inspect 922224
-weread --agent shelf list --all
-weread --agent notes corpus --book-id 922224 --book-id 3300045871
-weread --agent reviews batch --book-id 922224 --type recommend,latest --limit 3
+weread operations
+weread --json operations
+weread --json operation describe stats.trend
 ```
 
-Agent mode is not just raw JSON without terminal colors. It extracts fields that
-matter for analysis, normalizes awkward values, and combines requests for common
-workflows. Every successful response uses the same envelope:
+`operations` is a small catalog. `operation describe` returns one self-contained
+descriptor with the command invocation, typed inputs, pagination contract, side
+effects, and known limitations. The full response schema is at
+`data.output.responseSchema`; `data.output.dataSchemaRef` identifies its data
+payload definition (`#/$defs/data`). A caller can therefore construct the
+command and its `jq` projection before seeing live user data.
+Descriptors are stable for a given build and can be cached by operation ID.
+
+Stable JSON errors carry the same schema identity fields as successes. An error
+whose argv did not resolve to a registered leaf uses the cataloged
+`invocation.error` contract; argument errors for a known leaf use that leaf's
+response schema. Both are available through `operation describe`. Successful
+responses are written to stdout; structured failures are written to stderr and
+retain a nonzero exit status.
+
+Invoke the advertised command with `--json`:
+
+```bash
+weread --json stats trend | jq '.data.periods'
+weread --json book inspect 922224 | jq '.data'
+weread --json notes notebooks --limit 20 | jq '.data.page'
+```
+
+Every successful stable response uses the same envelope:
 
 ```json
 {
   "ok": true,
   "data": {},
   "meta": {
-    "schemaVersion": "2",
+    "schemaVersion": "3",
     "gatewaySkillVersion": "1.0.5",
     "complete": true,
-    "timeZone": "Asia/Shanghai"
+    "timeZone": "Asia/Shanghai",
+    "operationId": "stats.trend",
+    "schemaId": "urn:weread:response:3:stats.trend"
   },
   "warnings": []
 }
 ```
 
-Before drawing conclusions, an agent should inspect `ok`, `meta.complete`, and
-`warnings`. A request may succeed while still carrying a pagination limit or a
-data-quality caveat.
+`meta.complete=true` means the requested command completed successfully. It does
+not mean a paginated collection has no more items. Paginated collection results
+report breadth and continuation in `data.page`; when `hasMore` is true,
+`nextArgv` contains the complete arguments for the next stable request, while
+`nextArgs` contains only its cursor flags. Paginated batch results carry these
+fields on each item's page, including the corresponding book and filter context
+in `nextArgv`. The complete argv also pins the effective gateway protocol
+version, so it remains executable even when the first request selected that
+version through the environment. Data-quality caveats remain separate in the
+operation data and `warnings`.
 
-The complete command surface and field guidance are discoverable without
-reading this README:
+Book-level note coverage is similarly explicit: `reviewsExhausted` reports
+whether every personal-review page for that book was collected. It does not
+change the meaning of `meta.complete`.
 
-```bash
-weread capabilities --json
-```
+Stable projections preserve documented facts, normalize recurring wire formats,
+and make missing values explicit. Upstream values such as statistics `compare`
+remain identifiable and are not expanded into CLI-selected interpretations or
+ratios. The CLI does not prescribe how the returned data should be interpreted
+or which analysis an agent should perform.
 
-### Reading trends
+`stats history` needs no guessed start year: omitted bounds cover the supported
+range from 2017 through the current Asia/Shanghai year. The first nonzero overall
+bucket is still reported as an activity fact, but it does not remove supported
+zero years. Each annual period separately reports `periodComplete`,
+`throughDate`, and `elapsedDays`, so the current year cannot be confused with
+`meta.complete`.
 
-```bash
-weread --agent stats trend
-weread --agent stats detail --mode annually --date 2025
-```
+`notes corpus --all-notebooks` traverses the live notebook index and returns
+notes at whole-book boundaries in bounded pages (10 books by default). Follow
+`data.page.nextArgv` until `hasMore=false`; its opaque cursor should be passed
+through unchanged. Use `--limit` to choose a different page size up to 50.
+Repeated `--book-id` flags remain a one-shot exact selection and are not
+truncated by `--limit` (up to 50 unique IDs).
 
-`stats trend` prepares several periods for comparison. Statistical responses
-include a `fieldGuide` that explains units and comparison semantics, leaving
-less room for an agent to infer meaning from field names alone.
+### Migrating from the v2 interface
 
-### Notes and personal thoughts
-
-Start with the full notebook index, then choose a relevant set of books for the
-corpus:
-
-```bash
-weread --agent notes notebooks --all
-weread --agent notes corpus --book-id 922224 --book-id 3300045871
-```
-
-The compact corpus distinguishes quoted book text from the reader's own words.
-This matters when an agent is looking for recurring ideas or describing the
-reader's point of view.
-
-### Recommendations with verification
-
-Personalized discovery is useful as a source of candidates:
-
-```bash
-weread --agent discover recommend --limit 12
-```
-
-Before presenting a shortlist, inspect the books together:
-
-```bash
-weread --agent book inspect-batch --book-id 922224 --book-id 3300045871
-```
-
-Inspection checks availability, shelf presence, progress, and note presence.
-The final recommendation remains an agent decision, where the reader's goals
-and existing knowledge can be considered.
-
-## Output and data boundaries
-
-Without a structured-output flag, `weread` prints concise terminal text.
-`--json` preserves the live gateway response shape for compatibility and
-debugging. `--agent` selects the smaller versioned contract described above.
-The raw response remains available; it simply does not need to attend every
-conversation.
-
-Book ratings in agent mode use a 0–10 scale, review ratings use 0–5, timestamps
-are converted to ISO strings, and durations remain seconds. Statistics include
-their own field guidance. In particular, `dayAverageReadTime` is based on
-natural calendar days rather than active reading days, and `compare` is the
-ratio change in that average. A value of `0.2` means an increase of 20%.
-
-`notes notebooks --all` follows every cursor page. A bounded result sets
-`meta.complete=false` when more pages remain. One notes corpus accepts up to 50
-book IDs. Bookmark positions contribute to WeRead's notebook counts but are not
-exportable as note content. In compact output, `thoughts[].content` contains the
-reader's wording; `quotedText` and `contextText` come from the book.
-
-Public-review output for agents is bounded and reports truncation. Returned
-links are included only when the gateway supplies a `deepLink`; the CLI does not
-construct `weread://` links on its own.
+| Old interface | Current interface |
+| --- | --- |
+| Raw, unwrapped `--json` | `--raw` |
+| Stable `--agent` response-schema v2 | `--json` or its `--agent` alias, response-schema v3 |
+| `capabilities` and `schema get` | `operations` and `operation describe` |
+| `meta.complete` described fetch coverage | `meta.complete` reports invocation completion; operation-specific page and period fields report coverage |
+| `notes sample` | Removed; compose `notes notebooks` and `notes corpus` |
 
 ## Raw gateway access
 
@@ -207,12 +205,14 @@ When a high-level command does not cover an endpoint, the raw gateway remains
 available:
 
 ```bash
-weread --json api call /store/search --param keyword=基因传 --param scope=10
+weread --raw api call /store/search --param keyword=基因传 --param scope=10
 ```
 
 Raw responses may be large. Request metadata such as `api_name` and
 `skill_version` is managed by the CLI and cannot be overridden through
-`--param`.
+`--param`. The generic gateway is intentionally available only in raw mode;
+`--json api call` is rejected because there is no stable schema for arbitrary
+upstream endpoints.
 
 ## Where this project fits
 
@@ -233,9 +233,9 @@ The default gateway protocol is `1.0.5`. It can be overridden with
 negotiated once and reported in `warnings`.
 
 Read requests retry transient network errors, HTTP 429/5xx responses, gateway
-rate limits, empty success bodies, and malformed responses. `doctor` exits
-nonzero unless credentials are present and the gateway is reachable;
-structured output also reports `data.ready`.
+rate limits, empty success bodies, and malformed responses. `doctor` exits zero
+when the diagnostic itself completes, even when `data.ready=false`; scripts can
+require readiness with `weread --json doctor | jq -e '.data.ready'`.
 
 Protocol semantics are cross-checked against Tencent's
 [WeChatReading](https://github.com/Tencent/WeChatReading) repository. The live
@@ -255,10 +255,11 @@ scans it for unexpected files, local paths, or API-key-shaped values. Release
 instructions are in [RELEASING.md](RELEASING.md), and security reports are
 covered by [SECURITY.md](SECURITY.md).
 
-Maintainers can run the bounded, read-only gateway suite with an exported key:
+Maintainers can run the bounded, read-only gateway suite with an exported key
+or the local CLI config:
 
 ```bash
-WEREAD_API_KEY="wrk-..." pnpm run test:live
+pnpm run test:live
 ```
 
 ## License

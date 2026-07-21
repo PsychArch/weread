@@ -1,8 +1,30 @@
 import { describe, expect, it, vi } from "vitest";
-import { assertGatewayOk, parseParam, WereadClient } from "../src/client.js";
+import {
+  SKILL_VERSION,
+  WereadClient,
+  assertGatewayOk,
+  parseParam,
+  resolveGatewaySkillVersion,
+} from "../src/client.js";
 import { CliError } from "../src/errors.js";
 
 describe("WereadClient", () => {
+  it("normalizes gateway version overrides and never resolves an empty version", () => {
+    const previous = process.env.WEREAD_SKILL_VERSION;
+    try {
+      delete process.env.WEREAD_SKILL_VERSION;
+      expect(resolveGatewaySkillVersion(" 1.0.8 ")).toBe("1.0.8");
+      expect(resolveGatewaySkillVersion("   ")).toBe(SKILL_VERSION);
+
+      process.env.WEREAD_SKILL_VERSION = " 1.0.7 ";
+      expect(resolveGatewaySkillVersion()).toBe("1.0.7");
+      expect(resolveGatewaySkillVersion("   ")).toBe("1.0.7");
+    } finally {
+      if (previous === undefined) delete process.env.WEREAD_SKILL_VERSION;
+      else process.env.WEREAD_SKILL_VERSION = previous;
+    }
+  });
+
   it("builds flat gateway requests with skill_version", async () => {
     const calls: unknown[] = [];
     const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {

@@ -4,7 +4,7 @@
 
 一个非官方、只读的微信读书命令行工具。你可以用它在终端中查看阅读数据，也可以把整理后的结果交给 AI Agent 分析。
 
-`weread` 支持书城搜索、书架、阅读进度、阅读统计、笔记和公开点评。它的 Agent 模式不会照搬网关的完整回包，而是提取与分析有关的信息，放进带版本号的稳定结构中。
+`weread` 支持书城搜索、书架、阅读进度、阅读统计、笔记和公开点评。它为终端用户提供简洁文本，也为程序和 Agent 提供有 JSON Schema 的稳定接口。
 
 本项目与腾讯及微信读书不存在隶属、赞助或官方合作关系。
 
@@ -58,104 +58,116 @@ weread doctor
 ```bash
 weread search "基因传" --scope book --limit 5
 weread shelf summary
-weread stats detail --mode annually --date 2025 --view summary
+weread stats detail --mode annually --date 2025
+weread stats history
 weread notes export 922224 --format markdown --output notes.md
 weread discover recommend --limit 12
 ```
 
 默认输出面向终端阅读。日期、时长、评分和进度会转换成较自然的形式，不必因为服务器返回了某个字段，就让它原封不动地出现在屏幕上。
 
-## Agent 模式
+## 机器可读接口
 
-在命令前加上 `--agent`，可以得到精简、规范化的 JSON：
+CLI 有三种明确的输出边界：
+
+- 不加输出参数：面向终端用户的简洁文本；
+- `--json`：带稳定 envelope 和 JSON Schema 的规范化数据；
+- `--raw`：不封装的旧版兼容数据或上游原始形状数据，不承诺结构稳定。
+
+`--agent` 作为 `--json` 的静默兼容别名继续保留；新的集成应使用
+`--json`。
+
+operation 发现完全离线，不需要凭据，也不会请求线上网关：
 
 ```bash
-weread --agent stats trend
-weread --agent book inspect 922224
-weread --agent shelf list --all
-weread --agent notes corpus --book-id 922224 --book-id 3300045871
-weread --agent reviews batch --book-id 922224 --type recommend,latest --limit 3
+weread operations
+weread --json operations
+weread --json operation describe stats.trend
 ```
 
-Agent 模式不只是把终端颜色去掉。它会提取分析所需的字段，统一部分不便使用的值，并为常见任务组合多个请求。成功响应使用同一种外层结构：
+`operations` 返回一份小型目录。`operation describe` 返回单个、自包含的描述符，
+其中包括命令调用方式、带类型的输入、分页契约、副作用与已知限制。完整 response
+schema 位于 `data.output.responseSchema`；`data.output.dataSchemaRef` 指向其中的 data
+payload 定义（`#/$defs/data`）。调用方可以在看到真实用户数据之前构造命令和 `jq`
+路径。同一 build 的描述符可以按 operation ID 缓存复用。
+
+稳定 JSON 的错误响应也带有同样的 schema 身份字段。无法解析到已注册 leaf 的 argv
+使用目录中的 `invocation.error` 契约；已经确定 leaf 的参数错误继续使用该 leaf 的
+response schema。两者都可以通过 `operation describe` 离线取得。成功响应写入 stdout；
+带非零退出状态的结构化失败响应写入 stderr。
+
+随后使用 `--json` 调用描述符中给出的命令：
+
+```bash
+weread --json stats trend | jq '.data.periods'
+weread --json book inspect 922224 | jq '.data'
+weread --json notes notebooks --limit 20 | jq '.data.page'
+```
+
+所有成功的稳定响应使用同一种外层结构：
 
 ```json
 {
   "ok": true,
   "data": {},
   "meta": {
-    "schemaVersion": "2",
+    "schemaVersion": "3",
     "gatewaySkillVersion": "1.0.5",
     "complete": true,
-    "timeZone": "Asia/Shanghai"
+    "timeZone": "Asia/Shanghai",
+    "operationId": "stats.trend",
+    "schemaId": "urn:weread:response:3:stats.trend"
   },
   "warnings": []
 }
 ```
 
-Agent 在开始分析之前，应该检查 `ok`、`meta.complete` 和 `warnings`。请求成功并不总是代表结果毫无缺口，其中可能仍然包含分页限制或者数据质量提示。
+`meta.complete=true` 表示这次请求的命令已成功执行，不表示某个分页集合已经没有
+下一页。分页集合结果把范围与续取方式放在 `data.page`；当 `hasMore` 为 true 时，
+`nextArgv` 给出下一次稳定请求所需的完整参数，`nextArgs` 则只保留 cursor 参数。
+分页 batch 结果会在每一项的 page 中提供这些字段，其中 `nextArgv` 包括对应的书和
+筛选条件。完整 argv 还会固定当前实际使用的网关协议版本，因此即使第一次请求通过
+环境变量选择版本，后续调用仍可直接执行。数据质量说明则继续独立放在 operation 数据与
+`warnings` 中。
 
-完整的命令能力和字段说明可以直接从 CLI 查询，不必依赖这份 README：
+书内个人点评的抓取范围由 `reviewsExhausted` 单独表示：它说明该书的个人点评分页是否
+已经取尽，不会改变 `meta.complete` 的含义。
 
-```bash
-weread capabilities --json
-```
+稳定 projection 会保留已有依据的事实，统一重复出现的网关格式，并明确表达缺失值；
+`compare` 这类上游字段会保留可识别的来源，不再扩展成由 CLI 选择的解释或比率。
+CLI 不规定调用方如何解释这些数据，也不替 Agent 选择分析方法。
 
-### 阅读趋势
+`stats history` 不需要猜测起始年份：省略边界时，它会覆盖从 2017 到当前上海时区年份
+的受支持范围。overall 中第一个非零年份仍会作为活动事实返回，但不会因此删掉受支持的
+零值年份。每个年度会另外返回 `periodComplete`、`throughDate` 和 `elapsedDays`，不会
+把当前年度是否结束与 `meta.complete` 混为一谈。
 
-```bash
-weread --agent stats trend
-weread --agent stats detail --mode annually --date 2025
-```
+`notes corpus --all-notebooks` 会遍历实时 notebook index，并按整本书的边界返回有界
+分页（默认每页 10 本）。当 `data.page.hasMore=true` 时直接执行 `nextArgv`，直到它变为
+false；其中的不透明 cursor 应原样传递。可以用 `--limit` 调整页大小，最大为 50。
+重复传入的 `--book-id` 仍然是一次性精确选择，不受 `--limit` 截断（最多 50 个唯一 ID）。
 
-`stats trend` 会整理多个周期的数据，方便 Agent 做比较。统计结果还带有 `fieldGuide`，其中说明了单位和比较口径，避免仅凭字段名推测含义。
+### 从 v2 接口迁移
 
-### 笔记与个人想法
-
-可以先取得完整的笔记本索引，再挑选与问题有关的书生成语料：
-
-```bash
-weread --agent notes notebooks --all
-weread --agent notes corpus --book-id 922224 --book-id 3300045871
-```
-
-精简语料会区分书中原文和读者自己的话。Agent 在寻找反复出现的主题，或者概括读者观点时，这个区别尤其重要。
-
-### 推荐与验证
-
-个性化发现可以先提供一批候选：
-
-```bash
-weread --agent discover recommend --limit 12
-```
-
-准备给出最终书单之前，可以批量检查这些书：
-
-```bash
-weread --agent book inspect-batch --book-id 922224 --book-id 3300045871
-```
-
-检查结果包括当前可读性、书架状态、阅读进度和笔记情况。最终推荐仍然由 Agent 完成，这样才能结合读者的目标和已有知识，而不是把网关返回的候选直接当成答案。
-
-## 输出方式与数据边界
-
-不使用结构化输出参数时，`weread` 会打印简洁的终端文本。`--json` 保留线上网关的原始结构，适合兼容脚本或排查问题；`--agent` 则使用前面介绍的精简契约。原始响应一直都在，只是不必每次都请它全员出席。
-
-Agent 模式中的书籍评分使用 0–10，点评评分使用 0–5，时间戳转换为 ISO 字符串，阅读时长仍以秒为单位。统计结果会附带字段说明。需要特别注意的是，`dayAverageReadTime` 按自然日计算，而不是只统计发生过阅读的日期；`compare` 表示这个自然日日均值相对上一周期的变化比例，`0.2` 代表增长 20%。
-
-`notes notebooks --all` 会继续请求全部游标页。如果只取得有限结果，而且后面仍有数据，`meta.complete` 会设为 `false`。一次笔记语料请求最多接受 50 个 book ID。书签位置会计入微信读书的笔记统计，但目前不能作为笔记内容导出。在精简结果中，`thoughts[].content` 是读者自己的文字，`quotedText` 和 `contextText` 来自书籍。
-
-面向 Agent 的公开点评会限制单条内容长度，并在发生截断时给出说明。只有网关实际返回 `deepLink` 时，CLI 才会展示链接，不会自行拼接 `weread://` 地址。
+| 旧接口 | 当前接口 |
+| --- | --- |
+| `--json` 返回不封装的原始数据 | `--raw` |
+| 稳定的 `--agent` response-schema v2 | `--json` 或其 `--agent` 别名，response-schema v3 |
+| `capabilities` 与 `schema get` | `operations` 与 `operation describe` |
+| `meta.complete` 表示抓取覆盖范围 | `meta.complete` 表示调用完成；operation 专用的 page 与 period 字段表示覆盖范围 |
+| `notes sample` | 已移除；组合使用 `notes notebooks` 与 `notes corpus` |
 
 ## 原始网关访问
 
 如果高级命令尚未覆盖某个接口，仍然可以调用原始网关：
 
 ```bash
-weread --json api call /store/search --param keyword=基因传 --param scope=10
+weread --raw api call /store/search --param keyword=基因传 --param scope=10
 ```
 
-原始响应可能很大。`api_name` 和 `skill_version` 等请求元数据由 CLI 管理，不能通过 `--param` 覆盖。
+原始响应可能很大。`api_name` 和 `skill_version` 等请求元数据由 CLI 管理，不能通过
+`--param` 覆盖。通用网关有意只在 raw 模式下开放；任意上游 endpoint 没有稳定 schema，
+因此 `--json api call` 会被拒绝。
 
 ## 这个项目在做什么角色
 
@@ -167,7 +179,9 @@ weread --json api call /store/search --param keyword=基因传 --param scope=10
 
 默认网关协议版本为 `1.0.5`，可以通过 `WEREAD_SKILL_VERSION` 或 `--skill-version` 覆盖。如果服务端提供同一主版本内的兼容升级，CLI 会协商一次，并在 `warnings` 中报告。
 
-读取请求会重试临时网络错误、HTTP 429/5xx、网关限流、空成功响应和格式异常的响应。只有凭据存在且网关可以访问时，`doctor` 才会以成功状态退出；结构化输出还会报告 `data.ready`。
+读取请求会重试临时网络错误、HTTP 429/5xx、网关限流、空成功响应和格式异常的响应。
+只要诊断本身成功完成，`doctor` 就会以状态 0 退出，即使 `data.ready=false`；脚本可用
+`weread --json doctor | jq -e '.data.ready'` 明确要求 readiness。
 
 协议语义会与腾讯的 [WeChatReading](https://github.com/Tencent/WeChatReading) 仓库交叉核对。线上 Agent Gateway 仍然是实际请求和响应行为的最终依据。如果观察到的行为与文字文档不同，CLI 会遵循线上响应，并通过验证覆盖这一行为。
 
@@ -180,10 +194,10 @@ pnpm run verify
 
 `verify` 会执行类型检查、构建和测试，生成 npm 产物，并检查其中是否混入了意外文件、本地路径或疑似 API Key。发布流程见 [RELEASING.md](RELEASING.md)，安全问题的报告方式见 [SECURITY.md](SECURITY.md)。
 
-维护者可以在已经导出 Key 的环境中运行有界、只读的线上测试：
+维护者可以通过已导出的 Key 或 CLI 本地配置运行有界、只读的线上测试：
 
 ```bash
-WEREAD_API_KEY="wrk-..." pnpm run test:live
+pnpm run test:live
 ```
 
 ## 许可证

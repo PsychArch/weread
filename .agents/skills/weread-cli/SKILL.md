@@ -1,102 +1,119 @@
 ---
 name: weread-cli
-description: Inspect and analyze a user's WeRead reading statistics, shelf, progress, notes, highlights, comments, public reviews, and recommendations through the local `weread` CLI. Use when a request asks for evidence-grounded reading insights, knowledge-gap analysis, book recommendations, note/comment synthesis, reading trends, or WeRead book availability checks.
+description: Retrieve a user's WeRead reading statistics, shelf, progress, notes, highlights, comments, public reviews, discovery results, and book metadata through the local `weread` CLI. Use when Codex needs read-only WeRead data or a stable JSON contract for programmatic CLI access.
 ---
 
 # WeRead CLI
 
-Use the installed `weread` command as the data layer, then perform
-interpretation in the response. Prefer compact high-level commands over raw
-gateway payloads.
+Use the CLI as a read-only data interface.
 
-## Start safely
+## Select the executable
 
-1. Verify installation with `command -v weread`; if missing, install it with
-   `pnpm add --global @psycharch/weread`. Inspect
-   `weread capabilities --json` when command discovery is needed.
-2. Run `weread --agent doctor` before reading user data and require both outer
-   `ok=true` and `data.ready=true`. Authentication comes from `WEREAD_API_KEY`
-   first, then the local config written by `weread config set-key`.
-3. Keep all operations read-only. Do not invoke a live mutation or store
-   credentials unless the user explicitly requests it.
-4. Check `ok`, `meta.complete`, and `warnings` in every agent envelope before
-   treating the data as complete.
-5. Run `weread capabilities --json` when a workflow needs batching,
-   full-library coverage, or field semantics. `meta.complete` describes the
-   requested fetch or pagination; data-quality caveats can still appear in
-   `warnings` and `dataQuality`.
+Examples below use `weread`. In the `@psycharch/weread` source checkout, use
+`node dist/cli.js` instead; run `pnpm run build` after source changes before
+using it. Outside the checkout, use the PATH-installed `weread`.
 
-## Choose the smallest data command
+## Use stable operations
 
-- Reading patterns: use `weread --agent stats trend`. Its `fieldGuide` defines
-  units and comparison semantics. Use `stats detail` with
-  `--mode weekly|monthly|annually|overall` and an optional `--date` when one
-  current or historical period needs closer inspection. Agent output is already
-  compact and does not need `--view summary`.
-- One book: resolve ambiguous names with `book resolve`, then use
-  `weread --agent book inspect <bookId>` to verify availability, progress, shelf
-  presence, and note presence.
-- Several candidate books: resolve names first, then use
-  `weread --agent book inspect-batch` with at most 20 repeatable `--book-id`
-  values. This shares shelf and notebook fetches and is preferred for
-  availability-filtered recommendations.
-- Personal notes and comments: use `weread --agent notes notebooks --all` to
-  discover every notebook, then select a bounded, representative set for
-  `notes corpus`. One corpus call accepts at most 50 repeatable `--book-id`
-  values. `highlights[].text` is source text. Only `thoughts[].content` is the
-  reader's own wording; `quotedText` and `contextText` are book context.
-  `excerpt-only`, `rating-only`, and `empty` entries must not be interpreted as
-  personal claims. Bookmark positions count toward notebook totals but are not
-  exportable in a corpus.
-- Public reception: use `weread --agent reviews batch` with bounded, explicit
-  book IDs, review types, and low limits (usually 1-3). Public reviews are other
-  readers' views, never the user's own notes.
-- Recommendations: start with `discover recommend` or `discover similar`, then
-  verify every shortlisted title with `book inspect` before recommending it as
-  readable.
-- Raw fallback: use
-  `weread --json api call <api-name> --param key=value` only when no high-level
-  command exposes the required read-only data. Treat that response as
-  upstream-shaped and potentially large.
-
-Use IDs after resolution so repeated calls cannot drift to a different title.
-`shelf list --all` and `notes notebooks --all` provide full collection coverage;
-a bounded list intentionally sets `meta.complete=false`. Never source arbitrary
-`.env` files; use an already-exported environment variable or the CLI config.
-
-For a very large notes library, do not immediately fetch every note. Start from
-the complete notebook index, stratify by topic, recency, note density, and
-reading progress, and state the sample coverage. If the user explicitly requires
-a full corpus, run sequential batches of at most 50 books. The CLI retries the
-gateway's rate-limit response with backoff, but repeated full-corpus calls can
-still need a pause; keep successful batches and do not restart them.
-
-## Interpret the evidence
-
-Base conclusions on multiple signals where possible: time trends,
-completed/in-progress books, category and author concentration, and recurring
-concepts in personal notes. For statistics, durations are seconds;
-`dayAverageReadTime` is a natural-calendar-day average; `compare` is its change
-ratio; bucket granularity varies by mode. Use `totalReadTime` when a warning says
-the read/listen breakdown is inconsistent. Never turn period "read" and
-"finished" counts into a cohort completion rate.
-
-Label uncertainty when coverage is incomplete or an upstream ranked item is
-unidentified. Treat personalized discovery as a candidate generator: it often
-reinforces the reader's dominant categories. Knowledge-gap recommendations must
-fill a demonstrated gap, exclude already-covered material where appropriate,
-consider evidence quality, and be verified as currently readable.
-
-## Examples
+Invoke a known operation directly:
 
 ```bash
-weread --agent stats trend
+weread --json <command> [arguments]
 ```
 
-```bash
-weread --agent notes corpus --book-id 922224 --book-id 3300045871
-```
+Discovery is only needed when the operation ID is unknown:
 
 ```bash
-weread --agent reviews batch --book-id 922224 --type recommend,latest --limit 10
+weread operations
+weread --json operations
 ```
+
+Before guessing unfamiliar flags, response paths, pagination, or limitations,
+fetch that operation's descriptor once:
+
+```bash
+operation_id=notes.notebooks
+descriptor_file=$(mktemp)
+weread --json operation describe "$operation_id" >"$descriptor_file"
+
+jq '{
+  id: .data.id,
+  jsonArgv: .data.invocation.jsonArgv,
+  input: .data.input,
+  pagination: .data.pagination,
+  limitations: .data.limitations,
+  schemaId: .data.output.schemaId,
+  dataRequired: .data.output.responseSchema["$defs"].data.required,
+  dataProperties: (.data.output.responseSchema["$defs"].data.properties | keys)
+}' "$descriptor_file"
+```
+
+The exact success-and-error schema is at `data.output.responseSchema`.
+`data.output.dataSchemaRef` is the JSON Schema reference to the success
+`data` payload. Use bracket notation for `"$defs"` in `jq`, as shown
+above. The descriptor is self-contained; use its singular `input` field and
+schema instead of probing a live response with `keys` or fallback field names.
+
+Cache the descriptor per operation ID for the selected executable. Refresh it
+after rebuilding or changing the executable, or when a response's
+`meta.schemaId` differs.
+
+For pagination, `data.page.nextArgv` is the complete argument array to pass
+after the executable. Execute that array unchanged. `nextArgs` contains only
+the continuation values. Paginated batch results expose the same pair on each
+batch item's page. Treat opaque cursors as pass-through values; do not decode
+or reconstruct them.
+
+Live operations check their own credentials and gateway preconditions. Use
+`weread --json doctor` only when a separate readiness diagnostic is useful;
+operation discovery and description are fully offline.
+
+Capture an expensive live response once, then apply every local `jq`
+projection to that saved stdout. Keep stderr separate and preserve the CLI
+status:
+
+```bash
+stdout_file=$(mktemp)
+stderr_file=$(mktemp)
+if weread --json notes notebooks --limit 20 >"$stdout_file" 2>"$stderr_file"; then
+  jq -e '
+    .ok == true and
+    .meta.operationId == "notes.notebooks" and
+    (.meta.schemaId | type == "string") and
+    (.warnings | type == "array")
+  ' "$stdout_file" >/dev/null
+  jq '.data.books' "$stdout_file"
+else
+  exit_code=$?
+  jq -e '.ok == false and (.error.code | type == "string")' "$stderr_file" >&2 ||
+    printf 'weread process failure\n' >&2
+  exit "$exit_code"
+fi
+```
+
+A zero exit writes the `ok=true` response to stdout. A nonzero exit writes the
+schema-backed `ok=false` response to stderr. Unmatched argv uses
+`invocation.error`; argument errors for a known leaf use that leaf's response
+contract. Treat non-JSON stderr as a process failure.
+
+On success, inspect `meta.complete`, `warnings`, and operation-specific
+quality, coverage, or continuation fields. `meta.complete` means that the
+invocation completed; collection and period coverage have separate fields in
+the descriptor schema. Full JSON Schema validation is optional when the task
+needs it.
+
+## Stable and raw boundaries
+
+- Default output is concise text for humans.
+- `--json` is the stable, schema-backed machine interface.
+- `--raw` exposes legacy or upstream-shaped JSON with no stable schema. Use it
+  only when no stable operation exposes the required read-only data, and do
+  not infer a durable response contract from it.
+- Access the generic gateway only through the explicit raw escape hatch:
+
+  ```bash
+  weread --raw api call <api-name> [--param key=value]
+  ```
+
+This skill covers read-only access. Do not use the raw gateway to synthesize a
+mutation.

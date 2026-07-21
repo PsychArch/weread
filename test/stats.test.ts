@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parsePeriodDate, statsWarnings, summarizeStats, summarizeTrendPeriod } from "../src/stats.js";
+import { annotateHistoryPeriods, parsePeriodDate, statsHistoryRange, statsWarnings, summarizeStats, summarizeTrendPeriod } from "../src/stats.js";
 
 describe("stats summaries", () => {
   it("keeps trend fields while removing bulky book metadata", () => {
@@ -37,16 +37,10 @@ describe("stats summaries", () => {
       readDays: 2,
       dayAverageReadTime: 2354,
       compare: 0.25,
-      comparison: {
-        ratio: 0.25,
-        percent: 25,
-        direction: "up",
-        basis: "natural-day-average",
-      },
       preferTimeWord: "偏好上午与夜晚阅读",
       preferCategoryWord: "偏好阅读科学技术",
       readTimes,
-      readStat: [{ label: "读过", value: "2本" }],
+      readStat: [{ label: "读过", value: "2本", numericValue: 2, unit: "本" }],
       topBooks: [{
         title: "基因传",
         author: "悉达多·穆克吉",
@@ -55,7 +49,10 @@ describe("stats summaries", () => {
       }],
       categories: [{ title: "科学技术", count: 1, readTime: 23843 }],
       authors: [{ name: "悉达多·穆克吉", count: 1, readTime: "6小时37分钟" }],
-      dataQuality: { unidentifiedRankedItems: 0 },
+      dataQuality: {
+        unidentifiedRankedItems: 0,
+        durationBreakdown: { status: "unavailable", deltaSeconds: null },
+      },
     });
     expect(JSON.stringify(summary)).not.toContain("very long intro");
     expect(JSON.stringify(summary)).not.toContain("cover.jpg");
@@ -69,7 +66,7 @@ describe("stats summaries", () => {
 
     expect(period.bucketGranularity).toBe("day");
     expect(period.buckets).toEqual([{ startDate: "2026-06-01", seconds: 120 }]);
-    expect(period.counts).toEqual([{ label: "读过", value: "1本" }]);
+    expect(period.counts).toEqual([{ label: "读过", value: "1本", numericValue: 1, unit: "本" }]);
   });
 
   it("summarizes album entries and tolerates missing optional fields", () => {
@@ -87,7 +84,10 @@ describe("stats summaries", () => {
       topBooks: [{ title: "Some Album", author: "Narrator", tags: ["听书"] }],
       categories: [],
       authors: [],
-      dataQuality: { unidentifiedRankedItems: 0 },
+      dataQuality: {
+        unidentifiedRankedItems: 0,
+        durationBreakdown: { status: "unavailable", deltaSeconds: null },
+      },
     });
   });
 
@@ -106,11 +106,11 @@ describe("stats summaries", () => {
     expect(period.bucketGranularity).toBe("month");
     expect(period.dataQuality).toEqual({
       unidentifiedRankedItems: 1,
-      durationBreakdownMatchesTotal: false,
+      durationBreakdown: { status: "mismatch", deltaSeconds: 20 },
     });
     expect(statsWarnings([period])).toEqual([
       "annually: omitted 1 ranked item(s) whose upstream title and author were empty.",
-      "annually: wrReadTime + wrListenTime does not match totalReadTime; use totalReadTime as authoritative.",
+      "annually: wrReadTime + wrListenTime differs from totalReadTime by 20 second(s).",
     ]);
   });
 
@@ -118,5 +118,61 @@ describe("stats summaries", () => {
     expect(parsePeriodDate("2026")).toBe(1767196800);
     expect(parsePeriodDate("2026-07")).toBe(1782835200);
     expect(() => parsePeriodDate("2026-02-30")).toThrow("Invalid calendar date");
+  });
+
+  it("derives explicit history bounds from the returned overall buckets", () => {
+    const overall = summarizeTrendPeriod({
+      readTimes: {
+        "1514736000": 0,
+        "1546272000": 0,
+        "1577808000": 42,
+        "1609430400": 100,
+      },
+    }, "overall");
+
+    expect(statsHistoryRange([overall], 2026)).toEqual({
+      earliestSupportedYear: 2017,
+      firstNonzeroYear: 2020,
+      lastCompleteYear: 2025,
+      currentYear: 2026,
+      source: "stats.trend.overall.buckets",
+    });
+  });
+
+  it("adds calendar coverage facts without analytical ratios", () => {
+    const periods = annotateHistoryPeriods([
+      {
+        year: 2023,
+        ...summarizeTrendPeriod({ totalReadTime: 3600, readDays: 1 }, "annually"),
+      },
+      {
+        year: 2024,
+        ...summarizeTrendPeriod({ totalReadTime: 7200, readDays: 2 }, "annually"),
+      },
+    ], "2025-07-20");
+
+    expect(periods[0]).toMatchObject({
+      startDate: "2023-01-01",
+      endDate: "2023-12-31",
+      throughDate: "2023-12-31",
+      periodComplete: true,
+      elapsedDays: 365,
+    });
+    expect(periods[0]).not.toHaveProperty("derivedMetrics");
+    expect(periods[1]).not.toHaveProperty("derivedMetrics");
+  });
+
+  it("marks the current annual period partial and uses elapsed calendar days", () => {
+    const [period] = annotateHistoryPeriods([{
+      year: 2026,
+      ...summarizeTrendPeriod({ totalReadTime: 7200, readDays: 148 }, "annually"),
+    }], "2026-07-20");
+
+    expect(period).toMatchObject({
+      throughDate: "2026-07-20",
+      periodComplete: false,
+      elapsedDays: 201,
+    });
+    expect(period).not.toHaveProperty("derivedMetrics");
   });
 });

@@ -1,5 +1,7 @@
 type UnknownRecord = Record<string, unknown>;
 
+export const STATS_HISTORY_MIN_YEAR = 2017;
+
 export interface StatsSummary {
   mode: string;
   baseTime?: number;
@@ -9,7 +11,6 @@ export interface StatsSummary {
   readDays?: number;
   dayAverageReadTime?: number;
   compare?: number;
-  comparison?: StatsComparison;
   preferTimeWord?: string;
   preferCategoryWord?: string;
   readTimes: Record<string, number>;
@@ -23,6 +24,8 @@ export interface StatsSummary {
 export interface StatsCountSummary {
   label: string;
   value: string;
+  numericValue: number | null;
+  unit: string | null;
 }
 
 export type StatsBucketGranularity = "day" | "month" | "year";
@@ -38,28 +41,30 @@ export interface StatsTrendPeriod extends Omit<StatsSummary, "readTimes" | "read
   counts: StatsCountSummary[];
 }
 
-export interface StatsComparison {
-  ratio: number;
-  percent: number;
-  direction: "up" | "down" | "unchanged";
-  basis: "natural-day-average";
+export interface StatsHistoryPeriod extends StatsTrendPeriod {
+  year: number;
+  startDate: string;
+  endDate: string;
+  throughDate: string;
+  periodComplete: boolean;
+  elapsedDays: number;
 }
 
 export interface StatsDataQuality {
   unidentifiedRankedItems: number;
-  durationBreakdownMatchesTotal?: boolean;
+  durationBreakdown: {
+    status: "unavailable" | "matches" | "mismatch";
+    deltaSeconds: number | null;
+  };
 }
 
-export const STATS_FIELD_GUIDE = {
-  durationUnit: "seconds",
-  totalReadTime: "Authoritative reading/listening total for the requested period.",
-  dayAverageReadTime: "Natural-calendar-day average, including days with no reading; not the average per active reading day.",
-  compare: "Ratio change in natural-day average versus the previous equivalent period; 0.2 means up 20%.",
-  counts: "Period event summaries from WeRead; read and finished counts are not a cohort completion rate.",
-  buckets: "Bucket size depends on mode: day for weekly/monthly, month for annually, year for overall.",
-  durationBreakdown: "Use totalReadTime when wrReadTime plus wrListenTime does not match it.",
-  topBooks: "WeRead returns at most 10 ranked items; unidentified upstream items are omitted and reported in dataQuality/warnings.",
-} as const;
+export interface StatsHistoryRange {
+  earliestSupportedYear: number;
+  firstNonzeroYear: number | null;
+  lastCompleteYear: number;
+  currentYear: number;
+  source: "stats.trend.overall.buckets";
+}
 
 export interface StatsBookSummary {
   title: string;
@@ -87,10 +92,10 @@ export function summarizeStats(result: unknown, mode: string): StatsSummary {
   const wrListenTime = finiteNumber(record.wrListenTime);
   const compare = finiteNumber(record.compare);
   const ranked = summarizeLongest(record.readLongest);
-  const durationBreakdownMatchesTotal = totalReadTime !== undefined
+  const durationDelta = totalReadTime !== undefined
     && wrReadTime !== undefined
     && wrListenTime !== undefined
-    ? totalReadTime === wrReadTime + wrListenTime
+    ? wrReadTime + wrListenTime - totalReadTime
     : undefined;
   return {
     mode,
@@ -100,15 +105,7 @@ export function summarizeStats(result: unknown, mode: string): StatsSummary {
     ...(wrListenTime !== undefined ? { wrListenTime } : {}),
     ...optionalNumber("readDays", record.readDays),
     ...optionalNumber("dayAverageReadTime", record.dayAverageReadTime),
-    ...(compare !== undefined ? {
-      compare,
-      comparison: {
-        ratio: compare,
-        percent: compare * 100,
-        direction: compare > 0 ? "up" : compare < 0 ? "down" : "unchanged",
-        basis: "natural-day-average",
-      } satisfies StatsComparison,
-    } : {}),
+    ...(compare !== undefined ? { compare } : {}),
     ...optionalString("preferTimeWord", record.preferTimeWord),
     ...optionalString("preferCategoryWord", record.preferCategoryWord),
     readTimes: normalizeReadTimes(record.readTimes),
@@ -118,7 +115,12 @@ export function summarizeStats(result: unknown, mode: string): StatsSummary {
     authors: summarizeAuthors(record.preferAuthor),
     dataQuality: {
       unidentifiedRankedItems: ranked.unidentified,
-      ...(durationBreakdownMatchesTotal !== undefined ? { durationBreakdownMatchesTotal } : {}),
+      durationBreakdown: durationDelta === undefined
+        ? { status: "unavailable", deltaSeconds: null }
+        : {
+            status: durationDelta === 0 ? "matches" : "mismatch",
+            deltaSeconds: durationDelta,
+          },
     },
   };
 }
@@ -143,18 +145,63 @@ export function summarizeTrendPeriod(result: unknown, mode: string): StatsTrendP
 export function statsWarnings(periods: StatsTrendPeriod[]): string[] {
   const warnings: string[] = [];
   for (const period of periods) {
+    const year = "year" in period && typeof period.year === "number" ? period.year : undefined;
+    const context = year === undefined ? period.mode : `${period.mode} ${year}`;
     if (period.dataQuality.unidentifiedRankedItems > 0) {
       warnings.push(
-        `${period.mode}: omitted ${period.dataQuality.unidentifiedRankedItems} ranked item(s) whose upstream title and author were empty.`,
+        `${context}: omitted ${period.dataQuality.unidentifiedRankedItems} ranked item(s) whose upstream title and author were empty.`,
       );
     }
-    if (period.dataQuality.durationBreakdownMatchesTotal === false) {
+    if (period.dataQuality.durationBreakdown.status === "mismatch") {
       warnings.push(
-        `${period.mode}: wrReadTime + wrListenTime does not match totalReadTime; use totalReadTime as authoritative.`,
+        `${context}: wrReadTime + wrListenTime differs from totalReadTime by ${period.dataQuality.durationBreakdown.deltaSeconds} second(s).`,
       );
     }
   }
   return warnings;
+}
+
+export function statsHistoryRange(periods: StatsTrendPeriod[], currentYear: number): StatsHistoryRange {
+  const overall = periods.find((period) => period.mode === "overall");
+  const years = (overall?.buckets ?? [])
+    .filter((bucket) => bucket.seconds > 0)
+    .map((bucket) => Number(bucket.startDate.slice(0, 4)))
+    .filter((year) => Number.isInteger(year));
+  return {
+    earliestSupportedYear: STATS_HISTORY_MIN_YEAR,
+    firstNonzeroYear: years.length ? Math.min(...years) : null,
+    lastCompleteYear: currentYear - 1,
+    currentYear,
+    source: "stats.trend.overall.buckets",
+  };
+}
+
+export function annotateHistoryPeriods(
+  periods: Array<StatsTrendPeriod & { year: number }>,
+  asOfDate: string,
+): StatsHistoryPeriod[] {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(asOfDate)) {
+    throw new Error(`Expected an Asia/Shanghai as-of date in YYYY-MM-DD form, got ${asOfDate}`);
+  }
+  const asOfYear = Number(asOfDate.slice(0, 4));
+  return periods.map((period) => {
+    if (period.year > asOfYear) {
+      throw new Error(`History period ${period.year} is later than the as-of year ${asOfYear}`);
+    }
+    const startDate = `${period.year}-01-01`;
+    const endDate = `${period.year}-12-31`;
+    const periodComplete = period.year < asOfYear;
+    const throughDate = periodComplete ? endDate : asOfDate;
+    const elapsedDays = inclusiveCalendarDays(startDate, throughDate);
+    return {
+      ...period,
+      startDate,
+      endDate,
+      throughDate,
+      periodComplete,
+      elapsedDays,
+    };
+  });
 }
 
 export function parsePeriodDate(value: string): number {
@@ -185,9 +232,13 @@ function normalizeReadTimes(value: unknown): Record<string, number> {
 function summarizeReadStat(value: unknown): StatsCountSummary[] {
   return asArray(value).map((entry) => {
     const item = asRecord(entry);
+    const value = text(item.counts) || text(item.value) || String(item.count ?? "");
+    const parsed = parseCountValue(value);
     return {
       label: text(item.stat) || text(item.label) || text(item.name),
-      value: text(item.counts) || text(item.value) || String(item.count ?? ""),
+      value,
+      numericValue: parsed.numericValue,
+      unit: parsed.unit,
     };
   }).filter((entry) => entry.label || entry.value);
 }
@@ -205,7 +256,7 @@ function shanghaiDate(timestamp: number): string {
 
 function summarizeLongest(value: unknown): { items: StatsBookSummary[]; unidentified: number } {
   let unidentified = 0;
-  const items = asArray(value).slice(0, 10).flatMap((entry) => {
+  const items = asArray(value).flatMap((entry) => {
     const item = asRecord(entry);
     const book = asRecord(item.book);
     const album = asRecord(item.albumInfo);
@@ -231,12 +282,28 @@ function bucketGranularity(mode: string): StatsBucketGranularity {
   return "day";
 }
 
+function inclusiveCalendarDays(startDate: string, endDate: string): number {
+  const start = Date.parse(`${startDate}T00:00:00Z`);
+  const end = Date.parse(`${endDate}T00:00:00Z`);
+  return Math.floor((end - start) / 86_400_000) + 1;
+}
+
+function parseCountValue(value: string): { numericValue: number | null; unit: string | null } {
+  const match = value.trim().match(/^([0-9][0-9,]*(?:\.[0-9]+)?)\s*(.*)$/);
+  if (!match) return { numericValue: null, unit: null };
+  const numericValue = Number(match[1]!.replaceAll(",", ""));
+  return {
+    numericValue: Number.isFinite(numericValue) ? numericValue : null,
+    unit: match[2] || null,
+  };
+}
+
 function finiteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function summarizeCategories(value: unknown): StatsCategorySummary[] {
-  return asArray(value).slice(0, 10).map((entry) => {
+  return asArray(value).map((entry) => {
     const item = asRecord(entry);
     return {
       title: text(item.categoryTitle),
@@ -247,7 +314,7 @@ function summarizeCategories(value: unknown): StatsCategorySummary[] {
 }
 
 function summarizeAuthors(value: unknown): StatsAuthorSummary[] {
-  return asArray(value).slice(0, 8).map((entry) => {
+  return asArray(value).map((entry) => {
     const item = asRecord(entry);
     return {
       name: text(item.name),
