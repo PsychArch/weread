@@ -117,3 +117,12 @@ needs it.
 
 This skill covers read-only access. Do not use the raw gateway to synthesize a
 mutation.
+
+## Friend reading activity
+
+Use `node dist/cli.js --json discover friends --limit 20` in this checkout.
+Describe `discover.friends` once for its schema and cursor contract. Follow
+`data.page.nextArgv` unchanged; `data.syncKey` is for a later incremental
+refresh, not a replacement for the page cursor. This feed is not a complete
+friend reading history. The upstream endpoint is advertised by live discovery
+but not the public Markdown reference.

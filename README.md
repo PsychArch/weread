@@ -271,3 +271,25 @@ and Tencent identify service compatibility and do not imply sponsorship or
 endorsement.
 
 MIT © PsychArch
+
+### Friends' reading activity
+
+```bash
+weread discover friends --limit 20
+weread --json discover friends --limit 2
+weread --json operation describe discover.friends
+```
+
+`discover friends` reads `/discover/interact/type3`, an endpoint advertised by
+the live gateway but absent from its public Markdown reference. Each card
+contains a normalized book, friend names and IDs, upstream update timestamps
+in Unix seconds, and a display hint. The feed is not a complete reading history.
+
+Execute `data.page.nextArgv` unchanged to continue. `data.syncKey` is available
+for a later incremental refresh using `--synckey`; pagination preserves the
+original refresh key rather than substituting the latest response key.
+`--limit` requests a page size; the CLI preserves complete gateway pages to
+avoid skipping entries if the service returns more than requested.
+
+Development and release automation use the latest Node Current release. CI
+also verifies the supported Node 22.12 minimum and Node 24.

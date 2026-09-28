@@ -15,6 +15,25 @@ afterEach(async () => {
 });
 
 describe("built CLI", () => {
+  it("reads friend activity and executes the advertised continuation without adding a refresh key", async () => {
+    const env = await isolatedEnvironment();
+    env.WEREAD_API_KEY = "wrk-test";
+    env.NODE_OPTIONS = `--import=${mockGatewayPath}`;
+    const first = run(["--json", "discover", "friends", "--limit", "1"], env);
+    expect(first.status, first.stderr).toBe(0);
+    const page = JSON.parse(first.stdout);
+    expect(page).toMatchObject({ data: { returned: 1, syncKey: 99, items: [{ book: { title: "First" }, users: [{ userId: "42", name: "Friend" }] }] }, meta: { operationId: "discover.friends" } });
+    const second = run(page.data.page.nextArgv, env);
+    expect(second.status, second.stderr).toBe(0);
+    expect(JSON.parse(second.stdout).data).toMatchObject({ items: [{ book: { title: "Second" } }], page: { hasMore: false, nextArgv: null } });
+    const human = run(["discover", "friends", "--limit", "1"], env);
+    expect(human.status).toBe(0);
+    expect(human.stdout).toContain("Friend");
+    const raw = run(["--raw", "discover", "friends", "--limit", "1"], env);
+    expect(raw.status).toBe(0);
+    expect(JSON.parse(raw.stdout).items[0].users[0].userVid).toBe(42);
+  });
+
   it("exposes one offline discovery path with self-contained descriptors", async () => {
     const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { version: string };
     expect(run(["--version"]).stdout.trim()).toBe(manifest.version);
@@ -51,7 +70,7 @@ describe("built CLI", () => {
       },
       warnings: [],
     });
-    expect(catalog.data.operations).toHaveLength(29);
+    expect(catalog.data.operations).toHaveLength(30);
     expect(catalog.data.operations.map((operation) => operation.id)).toContain("invocation.error");
     expect(catalog.data.operations.map((operation) => operation.id)).not.toContain("notes.sample");
 
@@ -427,7 +446,7 @@ describe("built CLI", () => {
       stats: ["detail", "trend", "history"],
       notes: ["notebooks", "export", "corpus", "popular"],
       reviews: ["list", "batch"],
-      discover: ["recommend", "similar"],
+      discover: ["recommend", "similar", "friends"],
       api: ["call"],
     };
 

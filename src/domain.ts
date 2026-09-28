@@ -760,6 +760,52 @@ export function projectRecommendations(result: unknown, limit: number) {
   };
 }
 
+// Keep complete gateway pages: truncating a page would skip cards at its cursor.
+export function projectFriends(result: unknown, options: { limit: number; maxIdx?: number; synckey?: number }) {
+  const record = asRecord(result);
+  if (!Array.isArray(record.items)) {
+    throw new CliError("RESPONSE_INVALID", "Friend activity response has no items array.");
+  }
+  if (![true, false, 0, 1].includes(record.hasMore as boolean | number)) {
+    throw new CliError("RESPONSE_INVALID", "Friend activity response has no valid hasMore flag.");
+  }
+  const items = record.items.map((value) => {
+    const item = asRecord(value);
+    return {
+      itemId: typeof item.itemId === "string" ? item.itemId : number(item.itemId) === undefined ? null : String(item.itemId),
+      book: compactBook(item.book),
+      updatedAt: number(item.updateTime) ?? null,
+      hints: text(item.hints),
+      users: asArray(item.users).map((value) => {
+        const user = asRecord(value);
+        return {
+          userId: typeof user.userVid === "string" ? user.userVid : number(user.userVid) === undefined ? null : String(user.userVid),
+          name: text(user.name),
+          avatar: text(user.avatar),
+          updatedAt: number(user.updateTime) ?? null,
+        };
+      }),
+    };
+  });
+  const hasMore = flag(record.hasMore);
+  const cursor = record.nextMaxIdx;
+  const validCursor = nonNegativeSafeInteger(cursor) && cursor !== options.maxIdx;
+  const nextArgs = validCursor ? {
+    "--max-idx": cursor,
+    ...(options.synckey === undefined ? {} : { "--synckey": options.synckey }),
+  } : undefined;
+  return {
+    returned: items.length,
+    syncKey: nonNegativeSafeInteger(record.synckey) ? record.synckey : null,
+    page: pagination(hasMore, nextArgs, validCursor ? [
+      "--json", "discover", "friends", "--limit", String(options.limit),
+      "--max-idx", String(cursor),
+      ...(options.synckey === undefined ? [] : ["--synckey", String(options.synckey)]),
+    ] : undefined),
+    items,
+  };
+}
+
 export function projectSimilar(result: unknown, bookId: string, limit: number) {
   const resultRecord = asRecord(result);
   const similar = asRecord(resultRecord.booksimilar);

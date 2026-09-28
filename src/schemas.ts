@@ -268,6 +268,18 @@ const COMMON_DEFS: Record<string, JsonSchema> = {
     { const: "--session-id" },
     { type: "string", minLength: 1 },
   ])),
+  friendsCursorPage: pageSchema(exactNextArgs(
+    ["--max-idx"],
+    {
+      "--max-idx": { type: "integer", minimum: 0 },
+      "--synckey": { type: "integer", minimum: 0 },
+    },
+  ), { oneOf: [false, true].map((withSync) => exactArgv([
+    { const: "--json" }, { const: "discover" }, { const: "friends" },
+    { const: "--limit" }, { type: "string", pattern: "^[1-9][0-9]*$" },
+    { const: "--max-idx" }, { type: "string", pattern: "^[0-9]+$" },
+    ...(withSync ? [{ const: "--synckey" }, { type: "string", pattern: "^[0-9]+$" }] : []),
+  ])) }),
   similarCursorPage: pageSchema(exactNextArgs(
     ["--max-idx", "--session-id"],
     {
@@ -1377,6 +1389,44 @@ const DATA_SCHEMAS: Record<string, JsonSchema> = {
     },
     additionalProperties: false,
   },
+  "discover.friends": {
+    type: "object",
+    required: ["returned", "syncKey", "page", "items"],
+    properties: {
+      returned: { type: "integer", minimum: 0 },
+      syncKey: { type: ["integer", "null"], minimum: 0 },
+      page: { $ref: "#/$defs/friendsCursorPage" },
+      items: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["itemId", "book", "updatedAt", "hints", "users"],
+          properties: {
+            itemId: { type: ["string", "null"] },
+            book: { $ref: "#/$defs/compactBook" },
+            updatedAt: { type: ["number", "null"], description: "Upstream Unix timestamp in seconds." },
+            hints: { type: "string" },
+            users: {
+              type: "array",
+              items: {
+                type: "object",
+                required: ["userId", "name", "avatar", "updatedAt"],
+                properties: {
+                  userId: { type: ["string", "null"] },
+                  name: { type: "string" },
+                  avatar: { type: "string" },
+                  updatedAt: { type: ["number", "null"], description: "Upstream Unix timestamp in seconds." },
+                },
+                additionalProperties: false,
+              },
+            },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    additionalProperties: false,
+  },
   "discover.similar": {
     type: "object",
     required: ["returned", "page", "books"],
@@ -2160,6 +2210,31 @@ export const STABLE_OPERATIONS: StableOperation[] = [
     provides: ["personalized book candidates", "upstream recommendation reasons"],
     pagination: NO_PAGINATION,
     limitations: ["The gateway response does not expose reliable continuation metadata for this operation."],
+  }),
+  operation({
+    id: "discover.friends",
+    argv: ["discover", "friends"],
+    description: "Return friends' reading activity from the gateway discovery feed.",
+    input: {
+      positionals: [],
+      options: [
+        { name: "limit", flag: "--limit", type: "integer", required: false, repeatable: false,
+          default: 20, minimum: 1, description: "Requested page size; complete gateway pages are preserved." },
+        { name: "maxIdx", flag: "--max-idx", type: "integer", required: false, repeatable: false,
+          minimum: 0, description: "Continuation cursor from data.page.nextArgs." },
+        { name: "synckey", flag: "--synckey", type: "integer", required: false, repeatable: false,
+          minimum: 0, description: "Optional incremental refresh key from a previous data.syncKey." },
+      ],
+      constraints: ["Execute data.page.nextArgv unchanged to continue; use data.syncKey only when starting an incremental refresh."],
+    },
+    sideEffects: "gateway-read",
+    provides: ["book cards", "friend names", "upstream update timestamps", "refresh key", "continuation arguments"],
+    pagination: CURSOR_PAGINATION,
+    limitations: [
+      "This endpoint is advertised by live gateway discovery but absent from the public Markdown reference.",
+      "The gateway controls feed membership and ordering; returned cards are not a complete friend reading history.",
+      "The requested page size is not a local truncation limit, to avoid skipping cards at the gateway cursor.",
+    ],
   }),
   operation({
     id: "discover.similar",

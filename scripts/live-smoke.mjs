@@ -71,6 +71,7 @@ const expectedOperations = [
   "reviews.batch",
   "discover.recommend",
   "discover.similar",
+  "discover.friends",
 ];
 const listedOperationIds = new Set(operations.data.operations.map((entry) => entry.id));
 for (const operationId of expectedOperations) {
@@ -295,6 +296,11 @@ const similar = stable("discover.similar", [
 assertPage(similar.data.page, "discover.similar");
 assert(Array.isArray(similar.data.books), "Similar-book projection has no books array.");
 continueIfAvailable("discover.similar", similar.data.page);
+
+const friends = stable("discover.friends", ["discover", "friends", "--limit", "2"]);
+assertPage(friends.data.page, "discover.friends");
+assert(friends.data.returned === friends.data.items.length, "Friend activity count is inconsistent.");
+continueIfAvailable("discover.friends", friends.data.page);
 
 const apiList = raw(["api", "call", "/_list"], "raw API discovery");
 assert(Array.isArray(apiList.apis) && apiList.apis.length > 0, "Raw API discovery returned no APIs.");

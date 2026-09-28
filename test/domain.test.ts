@@ -14,6 +14,7 @@ import {
   projectSearch,
   projectShelfEntries,
   projectSimilar,
+  projectFriends,
   type GatewayCaller,
 } from "../src/domain.js";
 
@@ -520,5 +521,27 @@ describe("bounded domain projections", () => {
 
     expect(compact).toEqual({ returned: 1, books: [{ bookId: "1", title: "One", author: "" }] });
     expect(compact).not.toHaveProperty("page");
+  });
+});
+
+
+describe("friend activity pagination", () => {
+  it("preserves overfilled pages and the input refresh key, without substituting the response key", () => {
+    const data = projectFriends({ items: [{ book: { bookId: "1" } }, { book: { bookId: "2" } }], hasMore: 1, nextMaxIdx: 80, synckey: 101 }, { limit: 1, maxIdx: 90, synckey: 50 });
+    expect(data.returned).toBe(2);
+    expect(data.syncKey).toBe(101);
+    expect(data.page.nextArgs).toEqual({ "--max-idx": 80, "--synckey": 50 });
+    expect(data.page.nextArgv).toEqual(["--json", "discover", "friends", "--limit", "1", "--max-idx", "80", "--synckey", "50"]);
+    expect(data.items[0]).toMatchObject({ itemId: null, updatedAt: null, users: [] });
+  });
+  it("rejects missing, invalid and stalled continuation cursors", () => {
+    for (const nextMaxIdx of [undefined, -1, 1.5, 90, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => projectFriends({ items: [], hasMore: 1, nextMaxIdx }, { limit: 2, maxIdx: 90 })).toThrow(/without an executable continuation/);
+    }
+    expect(() => projectFriends({}, { limit: 2 })).toThrow(/no items array/);
+    expect(() => projectFriends({ items: [] }, { limit: 2 })).toThrow(/hasMore flag/);
+  });
+  it("returns an empty exhausted page with no fabricated sync key", () => {
+    expect(projectFriends({ items: [], hasMore: 0 }, { limit: 2 })).toEqual({ returned: 0, syncKey: null, items: [], page: { hasMore: false, nextArgs: null, nextArgv: null } });
   });
 });

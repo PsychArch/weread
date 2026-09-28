@@ -1,6 +1,6 @@
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
-import { inspectBook, projectNotebooks } from "../src/domain.js";
+import { inspectBook, projectNotebooks, projectFriends } from "../src/domain.js";
 import { jsonSuccess } from "../src/output.js";
 import { annotateHistoryPeriods, summarizeTrendPeriod } from "../src/stats.js";
 import {
@@ -42,6 +42,7 @@ const EXPECTED_OPERATION_IDS = [
   "reviews.list",
   "reviews.batch",
   "discover.recommend",
+  "discover.friends",
   "discover.similar",
 ] as const;
 
@@ -53,6 +54,15 @@ describe("bundled JSON Schemas", () => {
   it("registers every structured response contract and no task-specific sample workflow", () => {
     expect(STABLE_OPERATIONS.map((operation) => operation.id)).toEqual(EXPECTED_OPERATION_IDS);
     expect(STABLE_OPERATIONS.some((operation) => operation.id === "notes.sample")).toBe(false);
+  });
+
+  it("validates friend activity continuations with and without incremental refresh keys", () => {
+    const validate = validator().compile(schemaFor("discover.friends")!);
+    for (const options of [{ limit: 2 }, { limit: 2, synckey: 7 }]) {
+      const data = projectFriends({ items: [], hasMore: 1, nextMaxIdx: 80, synckey: 9 }, options);
+      const response = jsonSuccess(data, { operationId: "discover.friends", schemaId: responseSchemaId("discover.friends") });
+      expect(validate(response), JSON.stringify(validate.errors)).toBe(true);
+    }
   });
 
   it("compiles every advertised response and data schema", () => {

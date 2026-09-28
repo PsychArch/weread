@@ -85,6 +85,17 @@ globalThis.fetch = async (_input, init) => {
         },
       }],
     };
+  } else if (request.api_name === "/discover/interact/type3") {
+    const continued = request.maxIdx === 1700000000;
+    if (request.count !== 1 || (!continued && ("maxIdx" in request || "synckey" in request))) {
+      throw new Error("Unexpected friend activity request parameters");
+    }
+    if (continued && "synckey" in request) throw new Error("Page request must not add a refresh key");
+    payload = {
+      synckey: 99, hasMore: continued ? 0 : 1, nextMaxIdx: continued ? 0 : 1700000000,
+      items: [{ itemId: continued ? 2 : 1, book: { bookId: continued ? "5678" : "1234", title: continued ? "Second" : "First", author: "Author" },
+        updateTime: 1700000001, users: [{ userVid: 42, name: "Friend", updateTime: 1700000000 }], hints: "Reading" }],
+    };
   } else {
     payload = { errcode: 1, errmsg: `Unexpected fixture API: ${request.api_name}` };
   }

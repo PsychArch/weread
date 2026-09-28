@@ -205,3 +205,21 @@ pnpm run test:live
 腾讯的 WeChatReading 项目 Copyright © 2026 Tencent，采用 [Apache-2.0](https://github.com/Tencent/WeChatReading/blob/main/LICENSE) 许可证。本项目独立采用 MIT 许可证。文中提及微信读书、WeRead、WeChat 和 Tencent，仅用于说明服务兼容关系，不代表腾讯或微信读书对本项目的认可或赞助。
 
 MIT © PsychArch
+
+### 朋友在读
+
+```bash
+weread discover friends --limit 20
+weread --json discover friends --limit 2
+weread --json operation describe discover.friends
+```
+
+`discover friends` 读取实时网关发现接口中列出的 `/discover/interact/type3`。
+该接口尚未收录在公开 Markdown 文档中。每张卡片包含规范化书籍信息、
+朋友姓名与 ID、Unix 秒级更新时间和展示提示；不代表完整的朋友阅读历史。
+
+翻页时原样执行 `data.page.nextArgv`。`data.syncKey` 可通过 `--synckey`
+用于后续增量刷新；翻页保留最初传入的刷新 key，不会自动替换为回包的新 key。
+`--limit` 是请求页大小；若服务端返回更多条目，CLI 会保留完整页以免跨游标丢失数据。
+
+开发与发布使用最新 Node Current，CI 同时验证最低支持版本 Node 22.12 和 Node 24。

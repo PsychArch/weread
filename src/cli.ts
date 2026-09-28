@@ -25,6 +25,7 @@ import {
   projectSearch,
   projectShelfEntries,
   projectSimilar,
+  projectFriends,
   text,
 } from "./domain.js";
 import { CliError } from "./errors.js";
@@ -795,6 +796,24 @@ discover
     });
     const raw = limitSimilarRaw(result, options.limit);
     printResult(globalOptions(), outputData(raw, projectSimilar(result, bookId, options.limit)), () => renderSimilar(raw));
+  }));
+
+discover
+  .command("friends")
+  .description("show friends' reading activity")
+  .option("--limit <n>", "requested page size", parsePositiveInt, 20)
+  .option("--max-idx <n>", "continuation cursor from the previous response", parseNonNegativeInt)
+  .option("--synckey <n>", "sync key for an incremental refresh", parseNonNegativeInt)
+  .action(run(async (options: { limit: number; maxIdx?: number; synckey?: number }) => {
+    const result = await client().call("/discover/interact/type3", {
+      count: options.limit,
+      ...(options.maxIdx === undefined ? {} : { maxIdx: options.maxIdx }),
+      ...(options.synckey === undefined ? {} : { synckey: options.synckey }),
+    });
+    const data = projectFriends(result, options);
+    printResult(globalOptions(), outputData(result, data), () => data.items.length
+      ? data.items.map((item) => `${item.book.title} — ${item.book.author}\n  ${item.users.map((user) => user.name).join(", ")}${item.hints ? ` · ${item.hints}` : ""}`).join("\n")
+      : "No friend reading activity.");
   }));
 
 const api = program.command("api").description("raw gateway escape hatch");
