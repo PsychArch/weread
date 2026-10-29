@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented here.
 
+## 0.2.1 - 2026-10-29
+
+- Update development dependencies to `@types/node` 22.20.5 and Vitest 5.0.3,
+  including refreshed transitive dependencies.
+
 ## 0.1.1 - 2026-07-21
 
 - Make `--json` the stable, schema-backed machine interface and keep `--agent`
