@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented here.
 
+## 0.2.3 - 2026-10-31
+
+- Upgrade the build toolchain to tsup 9.0.0 and refresh its transitive dependencies.
+- Require Node.js 22.18+ on 22.x, 24.11+ on 24.x, or 26+; align the package
+  engine declaration, documentation, and CI minimum-version checks.
+
+## 0.2.2 - 2026-10-31
+
+- Update Vitest from 5.0.3 to 5.0.5 and refresh its transitive dependencies.
+
 ## 0.2.1 - 2026-10-29
 
 - Update development dependencies to `@types/node` 22.20.5 and Vitest 5.0.3,
