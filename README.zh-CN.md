@@ -31,7 +31,7 @@ CLI 负责获取和整理证据，解释仍然交给使用它的人或 Agent。�
 
 ## 快速开始
 
-需要 Node.js 22.12 或更高版本。使用 pnpm 安装：
+需要 Node.js 22.18+（22.x）、24.11+（24.x）或 26+。使用 pnpm 安装：
 
 ```bash
 pnpm add --global @psycharch/weread
@@ -222,4 +222,4 @@ weread --json operation describe discover.friends
 用于后续增量刷新；翻页保留最初传入的刷新 key，不会自动替换为回包的新 key。
 `--limit` 是请求页大小；若服务端返回更多条目，CLI 会保留完整页以免跨游标丢失数据。
 
-开发与发布使用最新 Node Current，CI 同时验证最低支持版本 Node 22.12 和 Node 24。
+开发与发布使用最新 Node Current，CI 同时验证最低支持版本 Node 22.18 和 Node 24.11。

@@ -52,7 +52,7 @@ reading history does not alter it.
 
 ## Quick start
 
-Node.js 22.12 or newer is required. Install the CLI with pnpm:
+Node.js 22.18+ (22.x), 24.11+ (24.x), or 26+ is required. Install the CLI with pnpm:
 
 ```bash
 pnpm add --global @psycharch/weread
@@ -292,4 +292,4 @@ original refresh key rather than substituting the latest response key.
 avoid skipping entries if the service returns more than requested.
 
 Development and release automation use the latest Node Current release. CI
-also verifies the supported Node 22.12 minimum and Node 24.
+also verifies the supported Node 22.18 and Node 24.11 minimums.
